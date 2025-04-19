@@ -1,14 +1,10 @@
-# 환경 변수 파일
-.env
-.env.*
-!.env.example
-
-# Python
+# .gitignore
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+env/
 build/
 develop-eggs/
 dist/
@@ -20,26 +16,26 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 
-# 로그 파일
-*.log
-logs/
-
-# 가상 환경
+# Virtual Environment
 venv/
-env/
 ENV/
 
-# IDE 설정
+# IDE files
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# 운영체제 파일
-.DS_Store
-Thumbs.db
+# Logs
+*.log
+agent_runner_*.log
+
+# Environment variables
+.env
+
+# Docker
+.dockerignore

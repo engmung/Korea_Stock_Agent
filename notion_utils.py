@@ -15,6 +15,8 @@ load_dotenv()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 REFERENCE_DB_ID = os.getenv("REFERENCE_DB_ID")
 SCRIPT_DB_ID = os.getenv("SCRIPT_DB_ID")
+INVESTMENT_AGENT_DB_ID = os.getenv("INVESTMENT_AGENT_DB_ID")
+INVESTMENT_PERFORMANCE_DB_ID = os.getenv("INVESTMENT_PERFORMANCE_DB_ID")
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +244,7 @@ async def create_script_report_page(database_id: str, properties: Dict[str, Any]
                     return None
         
         return None
-        
+
 async def update_notion_page(page_id: str, properties: Dict[str, Any], max_retries: int = 3, timeout: float = 30.0) -> bool:
     """
     Notion 페이지의 속성을 업데이트합니다.
@@ -334,3 +336,196 @@ async def reset_all_channels() -> bool:
     
     logger.info(f"Successfully reset {success_count}/{len(reference_pages)} channels")
     return success_count > 0
+
+async def create_investment_agent(agent_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """투자 에이전트 DB에 새 에이전트를 생성합니다."""
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
+    
+    properties = {
+        "에이전트 ID": {
+            "title": [
+                {
+                    "text": {
+                        "content": agent_data["agent_id"]
+                    }
+                }
+            ]
+        },
+        "투자 철학": {
+            "rich_text": [
+                {
+                    "text": {
+                        "content": agent_data["investment_philosophy"]
+                    }
+                }
+            ]
+        },
+        "생성일": {
+            "date": {
+                "start": datetime.now().isoformat()
+            }
+        },
+        "현재 상태": {
+            "select": {
+                "name": agent_data.get("status", "활성")
+            }
+        },
+        "평균 수익률": {
+            "number": agent_data.get("avg_return", 0)
+        },
+        "성공률": {
+            "number": agent_data.get("success_rate", 0)
+        }
+    }
+    
+    data = {
+        "parent": {"database_id": INVESTMENT_AGENT_DB_ID},
+        "properties": properties
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                url, 
+                headers=headers, 
+                json=data,
+                timeout=30.0
+            )
+            
+            response.raise_for_status()
+            logger.info(f"Successfully created investment agent: {agent_data['agent_id']}")
+            return response.json()
+            
+    except Exception as e:
+        logger.error(f"Error creating investment agent: {str(e)}")
+        return None
+
+async def create_investment_performance(performance_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """투자 실적 DB에 새 투자 실적을 생성합니다."""
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
+    
+    # 에이전트 ID 관계 설정
+    agent_relation = []
+    if "agent_id_relation" in performance_data and performance_data["agent_id_relation"]:
+        agent_relation = [{"id": performance_data["agent_id_relation"]}]
+    
+    properties = {
+        "투자 기록": {
+            "title": [
+                {
+                    "text": {
+                        "content": performance_data["title"]
+                    }
+                }
+            ]
+        },
+        "에이전트 ID": {
+            "relation": agent_relation
+        },
+        "시작일": {
+            "date": {
+                "start": performance_data["start_date"].isoformat()
+            }
+        },
+        "종료일": {
+            "date": {
+                "start": performance_data["end_date"].isoformat()
+            }
+        },
+        "투자 종목": {
+            "multi_select": [{"name": stock} for stock in performance_data.get("stocks", [])]
+        },
+        "투자 비중": {
+            "rich_text": [
+                {
+                    "text": {
+                        "content": performance_data.get("weights", "")
+                    }
+                }
+            ]
+        },
+        "총 수익률": {
+            "number": performance_data.get("total_return", 0)
+        },
+        "최대 낙폭": {
+            "number": performance_data.get("max_drawdown", 0)
+        },
+        "결과 평가": {
+            "select": {
+                "name": performance_data.get("evaluation", "부분 성공")
+            }
+        }
+    }
+    
+    data = {
+        "parent": {"database_id": INVESTMENT_PERFORMANCE_DB_ID},
+        "properties": properties
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                url, 
+                headers=headers, 
+                json=data,
+                timeout=30.0
+            )
+            
+            response.raise_for_status()
+            logger.info(f"Successfully created investment performance: {performance_data['title']}")
+            return response.json()
+            
+    except Exception as e:
+        logger.error(f"Error creating investment performance: {str(e)}")
+        return None
+
+async def increment_citation_count(script_page_id: str) -> bool:
+    """스크립트의 인용 횟수를 1 증가시킵니다."""
+    # 현재 페이지 정보 가져오기
+    url = f"https://api.notion.com/v1/pages/{script_page_id}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url, 
+                headers=headers
+            )
+            
+            response.raise_for_status()
+            page_data = response.json()
+            
+            # 현재 인용 횟수 가져오기
+            current_count = 0
+            if "properties" in page_data:
+                if "인용 횟수" in page_data["properties"]:
+                    current_count = page_data["properties"]["인용 횟수"].get("number", 0) or 0
+            
+            # 인용 횟수 증가
+            new_count = current_count + 1
+            
+            # 페이지 업데이트
+            properties = {
+                "인용 횟수": {
+                    "number": new_count
+                }
+            }
+            
+            return await update_notion_page(script_page_id, properties)
+            
+    except Exception as e:
+        logger.error(f"Error incrementing citation count: {str(e)}")
+        return False

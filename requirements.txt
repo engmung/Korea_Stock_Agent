@@ -2,8 +2,11 @@ fastapi==0.115.11
 uvicorn==0.34.0
 httpx==0.28.1
 youtube-transcript-api==0.6.3
-pydantic==2.10.6
 python-dotenv==1.0.1
 apscheduler==3.10.4
 google-generativeai==0.8.4
 google-genai
+finance-datareader>=0.9.50
+pandas==2.2.0
+numpy==1.26.3
+pydantic==2.10.6

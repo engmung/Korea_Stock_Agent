@@ -30,13 +30,13 @@ async def analyze_script_with_gemini(script: str, video_title: str, channel_name
             logger.error("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.")
             return "# AI 분석 보고서\n\n## 분석 오류\n\nGEMINI_API_KEY 환경 변수가 설정되지 않았습니다."
         
-        # 프롬프트 작성 - 간소화된 프롬프트
-        prompt = f"""# 경제 영상 스크립트 분석 요청
+        # 프롬프트 작성 - 주식 종목 분석에 특화된 프롬프트
+        prompt = f"""# 주식 종목 분석 요청
 
 제목: {video_title}
 채널: {channel_name}
 
-이 영상의 스크립트를 분석해주세요."""
+내가 주는 스크립트의 내용을 필요한 내용만 정리한 보고서로 만들어줘. 내가 주식종목채널의 콘텐츠를 주면, 너는 거기서 언급되는 종목들과 그 내용을 상세하게 기록해줘. 언급된 이유, 추천정도, 투자관점 등등 자세하게. 다른 내용은 필요 없고, 오로지 종목과 그에 관한 정보만 줘. 시장 전반에 대한 언급같은 건 필요 없어."""
 
         # 비동기적으로 Gemini API 호출 (API 제한 고려)
         async with API_SEMAPHORE:
@@ -49,7 +49,7 @@ async def analyze_script_with_gemini(script: str, video_title: str, channel_name
             def call_gemini():
                 try:
                     client = genai.Client(api_key=api_key)
-                    model = "gemini-2.5-pro-exp-03-25"  # 최신 모델 사용
+                    model = "gemini-2.5-flash-preview-04-17"  # 최신 모델 사용
                     
                     # Content 객체 생성
                     contents = [
@@ -59,35 +59,21 @@ async def analyze_script_with_gemini(script: str, video_title: str, channel_name
                         ),
                     ]
                     
-                    # 시스템 지시사항 설정 - 마크다운 형식 강조
-                    system_instruction = """너는 뛰어난 경제학자로서 제공된 영상 스크립트를 분석해 보고서를 작성해주는 역할을 맡았습니다.  
-                    
+                    # 시스템 지시사항 설정 - 종목 분석에 특화
+                    system_instruction = """당신은 투자 전문가로서 주식 종목 분석을 담당합니다. 주어진 스크립트에서 언급된 주식 종목과 관련 정보만을 추출하여 정리해주세요. 
+
 다음 지침을 반드시 따르세요:
 
-1. 보고서는 "# AI 분석 보고서"로 시작하세요.
+1. 종목 중심으로 정보를 정리하세요. 시장 전반에 대한 일반적인 내용은 제외합니다.
+2. 각 종목에 대해 다음 정보를 포함하세요:
+   - 언급 이유
+   - 추천 정도 (적극 매수/매수/중립/매도 등)
+   - 투자 관점 (단기/중기/장기)
+   - 주요 내용
 
-2. 각 섹션 제목은 ## 형식(두 개의 해시태그)으로 작성합니다:
-   - ## 요약
-   - ## 주요 키워드
-   - ## 핵심 내용 분석
-   - ## 경제적 시사점
-   - ## 추가 참고사항
-
-3. 불릿 포인트는 일관되게 다음과 같이 작성하세요:
-   - 첫 번째 항목
-   - 두 번째 항목
-
-4. 강조하고 싶은 부분은 **두 개의 별표**로 감싸세요.
-
-5. 문단과 문단 사이는 빈 줄로 구분하세요.
-
-6. 각 하위 섹션은 번호를 매겨 구분하세요:
-   1. 첫 번째 하위 섹션
-   2. 두 번째 하위 섹션
-
-7. 중요한 구분점에는 --- 를 사용하세요.
-
-8. 정확한 수치 데이터가 없을 경우 추측하지 말고 "정확한 수치가 제공되지 않음"으로 표기하세요."""
+3. 정보가 없는 경우 "언급되지 않음"으로 표시하세요.
+4. 마크다운 형식으로 작성하고, 각 종목은 제목(##)으로 구분하세요.
+5. 종목명은 정확하게 작성하세요. 오타가 있을 경우 올바른 종목명을 사용하세요."""
                     
                     generate_content_config = types.GenerateContentConfig(
                         response_mime_type="text/plain",
@@ -134,8 +120,8 @@ async def analyze_script_with_gemini(script: str, video_title: str, channel_name
                 logger.info("Gemini 분석 완료")
                 
                 # 응답이 마크다운 형식인지 확인하고 수정
-                if not response_text.startswith("# AI 분석 보고서"):
-                    response_text = "# AI 분석 보고서\n\n" + response_text
+                if not response_text.startswith("# "):
+                    response_text = "# 주식 종목 분석 보고서\n\n" + response_text
                 
                 # 마크다운 형식 일관성 개선
                 response_text = clean_markdown_format(response_text)
@@ -143,11 +129,11 @@ async def analyze_script_with_gemini(script: str, video_title: str, channel_name
                 return response_text
             else:
                 logger.error("Gemini가 빈 응답을 반환했습니다.")
-                return "# AI 분석 보고서\n\n## 분석 오류\n\nGemini API가 응답을 생성하지 못했습니다."
+                return "# 주식 종목 분석 보고서\n\n## 분석 오류\n\nGemini API가 응답을 생성하지 못했습니다."
             
     except Exception as e:
         logger.error(f"Gemini API 호출 중 오류 발생: {str(e)}")
-        return f"# AI 분석 보고서\n\n## 분석 오류\n\nGemini API 호출 중 오류가 발생했습니다: {str(e)}"
+        return f"# 주식 종목 분석 보고서\n\n## 분석 오류\n\nGemini API 호출 중 오류가 발생했습니다: {str(e)}"
 
 
 def clean_markdown_format(text: str) -> str:

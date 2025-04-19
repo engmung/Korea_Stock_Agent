@@ -1,12 +1,12 @@
-version: '3'
+version: "3"
 
 services:
-  youtube-script-api:
+  investment-advisor-api:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8001:8001"
+      - "8002:8002"
     volumes:
       - .:/app
       - ./.env:/app/.env
@@ -14,4 +14,5 @@ services:
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Seoul
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - NOTION_API_KEY=${NOTION_API_KEY}
     restart: unless-stopped

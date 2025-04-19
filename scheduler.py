@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from datetime import datetime, time
+from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from typing import Dict, Any, List, Optional
@@ -57,6 +57,18 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         channel_property = properties.get("채널명", {})
         if "select" in channel_property and channel_property["select"]:
             channel_name = channel_property["select"]["name"]
+            
+        # 콘텐츠 유형 가져오기
+        content_type = "단독 진행"
+        content_type_property = properties.get("콘텐츠 유형", {})
+        if "select" in content_type_property and content_type_property["select"]:
+            content_type = content_type_property["select"]["name"]
+            
+        # 투자 스타일 가져오기
+        investment_style = []
+        style_property = properties.get("투자 스타일", {})
+        if "multi_select" in style_property:
+            investment_style = [item["name"] for item in style_property["multi_select"]]
         
         if not channel_url or not keyword:
             logger.warning(f"채널 URL 또는 키워드가 없습니다. 스킵합니다.")
@@ -108,6 +120,9 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         upload_date_datetime = parse_upload_date(latest_video.get("upload_date", ""))
         upload_date_iso = upload_date_datetime.isoformat()
         
+        # 영상 날짜 - UTC로 변환
+        utc_upload_date = upload_date_datetime - timedelta(hours=9)
+
         # 스크립트 DB에 새 페이지 생성 (속성 설정)
         properties = {
             # 제목은 참고용 DB의 키워드만 사용
@@ -124,10 +139,10 @@ async def process_channel(page: Dict[str, Any]) -> bool:
             "URL": {
                 "url": latest_video["url"]
             },
-            # 영상 날짜 (추출 시간 대신 영상 업로드 날짜)
+            # 영상 날짜 - UTC 기준으로 저장
             "영상 날짜": {
                 "date": {
-                    "start": upload_date_iso
+                    "start": utc_upload_date.isoformat()
                 }
             },
             # 채널명 속성
@@ -146,11 +161,13 @@ async def process_channel(page: Dict[str, Any]) -> bool:
                     }
                 ]
             },
-            # 상태 속성 (분석/완료 두 가지)
-            "상태": {
-                "select": {
-                    "name": "분석"
-                }
+            # 인용 횟수 초기화
+            "인용 횟수": {
+                "number": 0
+            },
+            # 출연자 정보
+            "출연자": {
+                "multi_select": []  # 초기에는 비어있음, 필요시 채울 수 있음
             }
         }
         
@@ -185,9 +202,6 @@ async def process_channel(page: Dict[str, Any]) -> bool:
             })
             logger.info(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
             
-            # '분석' 상태 유지 (별도 업데이트 없음)
-            logger.info(f"생성된 페이지가 '분석' 상태로 유지됩니다.")
-            
             return True
         else:
             logger.error(f"스크립트+보고서 페이지 생성 실패: {keyword}")
@@ -199,96 +213,70 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         logger.error(f"채널 처리 중 오류: {str(e)}")
         return False
 
-async def process_channels_by_time(target_hour: int) -> None:
-    """특정 시간대에 맞는 채널들을 처리합니다."""
-    # 주말인 경우 실행하지 않음
-    current_weekday = datetime.now().weekday()
-    if current_weekday >= 5:  # 5=토요일, 6=일요일
-        logger.info(f"주말({['월','화','수','목','금','토','일'][current_weekday]}요일)에는 스크립트 추출을 실행하지 않습니다.")
-        return
+async def process_channels_by_setting() -> None:
+    """모든 활성화된 채널을 처리합니다."""
+    logger.info("채널 처리 시작")
     
-    logger.info(f"시간대 {target_hour}시에 맞는 채널 처리 시작")
-    
-    # 참고용 DB의 모든 채널 가져오기
-    reference_pages = await query_notion_database(REFERENCE_DB_ID)
-    logger.info(f"참고용 DB에서 {len(reference_pages)}개의 채널을 가져왔습니다.")
-    
-    # 처리할 채널 선택
-    channels_to_process = []
-    
-    for page in reference_pages:
-        properties = page.get("properties", {})
+    try:
+        # 참고용 DB의 모든 채널 가져오기
+        reference_pages = await query_notion_database(REFERENCE_DB_ID)
+        logger.info(f"참고용 DB에서 {len(reference_pages)}개의 채널을 가져왔습니다.")
         
-        # 활성화 상태 확인
-        is_active = False
-        active_property = properties.get("활성화", {})
-        if "checkbox" in active_property:
-            is_active = active_property["checkbox"]
-        
-        if not is_active:
-            continue
-        
-        # 시간 속성 가져오기
-        upload_time = None
-        time_property = properties.get("시간", {})
-        if "number" in time_property and time_property["number"] is not None:
-            upload_time = int(time_property["number"])
-        
-        if upload_time is None:
-            logger.warning(f"채널의 시간 속성이 없습니다. 기본값 9시로 설정합니다.")
-            upload_time = 9
-        
-        # 시간대별 스크립트 추출 시도 시간 설정 및 체크
-        should_process = False
-        
-        if upload_time < 12:  # 오전 영상
-            if target_hour in [9, 10, 11]:
-                should_process = True
-        elif upload_time < 20:  # 오후 영상
-            if target_hour in [upload_time + 2, upload_time + 3, upload_time + 4]:
-                should_process = True
-        else:  # 늦은 저녁 영상
-            if target_hour in [22, 23, 0, 1, 2, 3]:
-                should_process = True
-        
-        if should_process:
-            channels_to_process.append(page)
-    
-    logger.info(f"{target_hour}시에 처리할 채널 {len(channels_to_process)}개를 찾았습니다.")
-    
-    # 채널 처리 - Gemini API 제한(1분당 2개)을 고려하여 순차적으로 처리
-    success_count = 0
-    
-    for index, channel_page in enumerate(channels_to_process):
-        try:
-            channel_name = "Unknown"
-            properties = channel_page.get("properties", {})
-            if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
-                channel_name = properties["채널명"]["select"]["name"]
-                
-            logger.info(f"채널 처리 시작 ({index+1}/{len(channels_to_process)}): {channel_name}")
-            success = await process_channel(channel_page)
+        # 활성화된 채널만 선택
+        active_channels = []
+        for page in reference_pages:
+            properties = page.get("properties", {})
             
-            if success:
-                success_count += 1
-                logger.info(f"채널 처리 성공: {channel_name}")
-            else:
-                logger.warning(f"채널 처리 실패: {channel_name}")
+            # 활성화 상태 확인
+            is_active = False
+            active_property = properties.get("활성화", {})
+            if "checkbox" in active_property:
+                is_active = active_property["checkbox"]
+            
+            if is_active:
+                active_channels.append(page)
+        
+        logger.info(f"처리할 활성화된 채널 {len(active_channels)}개를 찾았습니다.")
+        
+        if not active_channels:
+            logger.info("처리할 활성화된 채널이 없습니다.")
+            return
+        
+        # 채널 처리 - API 제한 고려하여 순차적으로 처리
+        success_count = 0
+        
+        for index, channel_page in enumerate(active_channels):
+            try:
+                channel_name = "Unknown"
+                properties = channel_page.get("properties", {})
+                if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
+                    channel_name = properties["채널명"]["select"]["name"]
+                    
+                logger.info(f"채널 처리 시작 ({index+1}/{len(active_channels)}): {channel_name}")
+                success = await process_channel(channel_page)
                 
-            # 다음 채널 처리 전 1분 대기 (API 제한 1분당 2개 고려)
-            # 마지막 항목이 아니면 대기
-            if index < len(channels_to_process) - 1:
-                logger.info(f"API 제한 준수를 위해 1분 대기 중...")
-                await asyncio.sleep(60)  # 1분 대기
-                
-        except Exception as e:
-            logger.error(f"채널 처리 중 예외 발생: {str(e)}")
-            # 다음 채널 처리 전 1분 대기
-            if index < len(channels_to_process) - 1:
-                logger.info(f"오류 후 API 제한 준수를 위해 1분 대기 중...")
-                await asyncio.sleep(60)  # 1분 대기
-    
-    logger.info(f"{target_hour}시 처리 완료: {success_count}/{len(channels_to_process)} 채널 성공")
+                if success:
+                    success_count += 1
+                    logger.info(f"채널 처리 성공: {channel_name}")
+                else:
+                    logger.warning(f"채널 처리 실패: {channel_name}")
+                    
+                # 다음 채널 처리 전 1분 대기 (API 제한 1분당 2개 고려)
+                # 마지막 항목이 아니면 대기
+                if index < len(active_channels) - 1:
+                    logger.info(f"API 제한 준수를 위해 10초초 대기 중...")
+                    await asyncio.sleep(10)  # 1분 대기
+                    
+            except Exception as e:
+                logger.error(f"채널 처리 중 예외 발생: {str(e)}")
+                # 다음 채널 처리 전 1분 대기
+                if index < len(active_channels) - 1:
+                    logger.info(f"오류 후 API 제한 준수를 위해 10초초 대기 중...")
+                    await asyncio.sleep(10)  # 1분 대기
+        
+        logger.info(f"처리 완료: {success_count}/{len(active_channels)} 채널 성공")
+    except Exception as e:
+        logger.error(f"process_channels_by_setting 실행 중 오류: {str(e)}")
 
 async def reset_channels_daily() -> None:
     """매일 새벽 4시에 모든 채널을 활성화 상태로 초기화합니다."""
@@ -317,12 +305,11 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True
     )
     
-    # 주요 시간대별 작업 추가 (0-23시)
+    # 매시간 정각에 작업 실행 (0-23시)
     for hour in range(24):
         scheduler.add_job(
-            process_channels_by_time,
+            process_channels_by_setting,
             CronTrigger(hour=hour, minute=0),
-            args=[hour],
             id=f"process_channels_{hour}",
             replace_existing=True
         )
@@ -333,88 +320,74 @@ def setup_scheduler() -> AsyncIOScheduler:
     
     return scheduler
 
-async def simulate_scheduler_at_time(hour: int, minute: int, weekday: int, simulate_only: bool = True) -> Dict[str, Any]:
-    """특정 시간과 요일에 어떤 작업이 실행될지 시뮬레이션합니다."""
-    # 주말인 경우
-    if weekday >= 5:  # 5=토요일, 6=일요일
-        return {"message": "주말에는 작업이 실행되지 않습니다.", "tasks": []}
+async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = True) -> Dict[str, Any]:
+    """특정 시간 설정에 대한 작업 시뮬레이션"""
+    logger.info(f"시간 설정 {time_setting}에 대한 작업 시뮬레이션")
     
-    # 현재 시각에 해당하는 작업 찾기
-    tasks = []
-    
-    # 모든 채널 초기화 (새벽 4시)
-    if hour == 4 and minute == 0:
-        tasks.append({
-            "name": "모든 채널 활성화",
-            "action": "reset_all_channels"
-        })
+    try:
+        # 참고용 DB의 모든 채널 조회
+        reference_pages = await query_notion_database(REFERENCE_DB_ID)
+        logger.info(f"테스트: {len(reference_pages)}개의 채널을 가져왔습니다.")
         
-        if not simulate_only:
-            logger.info("실제 모든 채널 활성화 실행")
-            await reset_all_channels()
-    
-    # 참고용 DB의 모든 채널 조회
-    reference_pages = await query_notion_database(REFERENCE_DB_ID)
-    logger.info(f"테스트: {len(reference_pages)}개의 채널을 가져왔습니다.")
-    
-    for page in reference_pages:
-        properties = page.get("properties", {})
-        
-        # 활성화 상태 확인
-        is_active = False
-        active_property = properties.get("활성화", {})
-        if "checkbox" in active_property:
-            is_active = active_property["checkbox"]
-        
-        if not is_active:
-            continue
-        
-        # 시간 속성 가져오기
-        upload_time = 9  # 기본값
-        time_property = properties.get("시간", {})
-        if "number" in time_property and time_property["number"] is not None:
-            upload_time = int(time_property["number"])
-        
-        # 채널명과 키워드 가져오기
-        channel_name = "기타"
-        if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
-            channel_name = properties["채널명"]["select"]["name"]
-        
-        keyword = ""
-        if "제목" in properties and "title" in properties["제목"] and properties["제목"]["title"]:
-            keyword = properties["제목"]["title"][0]["plain_text"].strip()
-        
-        # 시간대별 스크립트 추출 시도 시간 설정
-        extraction_times = []
-        
-        if upload_time < 12:  # 오전 영상
-            extraction_times = [9, 10, 11, 12]
-        elif upload_time < 20:  # 오후 영상
-            extraction_times = [upload_time + 2, upload_time + 3, upload_time + 4]
-        else:  # 늦은 저녁 영상
-            extraction_times = [22, 23, 0, 1, 2, 3, 6]
-        
-        # 현재 시각에 맞는 작업 확인
-        if hour in extraction_times:
-            tasks.append({
-                "name": f"스크립트 추출 시도",
-                "channel": channel_name,
-                "keyword": keyword,
-                "upload_time": upload_time,
-                "scheduled_time": hour
-            })
+        # 활성화된 채널 찾기
+        active_channels = []
+        for page in reference_pages:
+            properties = page.get("properties", {})
             
-            if not simulate_only:
-                # 실제 스크립트 추출 실행
-                logger.info(f"실제 채널 처리 실행: {channel_name} ({keyword})")
-                success = await process_channel(page)
-                if success:
-                    logger.info(f"채널 처리 성공: {channel_name}")
-                else:
-                    logger.warning(f"채널 처리 실패: {channel_name}")
-    
-    return {
-        "simulated_time": f"{hour:02d}:{minute:02d}",
-        "weekday": ["월", "화", "수", "목", "금", "토", "일"][weekday],
-        "tasks": tasks
-    }
+            # 활성화 상태 확인
+            is_active = False
+            active_property = properties.get("활성화", {})
+            if "checkbox" in active_property:
+                is_active = active_property["checkbox"]
+            
+            if is_active:
+                # 채널명과 키워드 가져오기
+                channel_name = "기타"
+                if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
+                    channel_name = properties["채널명"]["select"]["name"]
+                
+                keyword = ""
+                if "제목" in properties and "title" in properties["제목"] and properties["제목"]["title"]:
+                    keyword = properties["제목"]["title"][0]["plain_text"].strip()
+                
+                active_channels.append({
+                    "channel_name": channel_name,
+                    "keyword": keyword,
+                    "page_id": page.get("id"),
+                    "page": page
+                })
+        
+        logger.info(f"활성화된 채널 {len(active_channels)}개 찾음")
+        
+        if not simulate_only and active_channels:
+            # 실제 실행 모드
+            logger.info("실제 채널 처리 실행 시작")
+            for i, channel in enumerate(active_channels):
+                logger.info(f"채널 처리 중 ({i+1}/{len(active_channels)}): {channel['channel_name']}")
+                await process_channel(channel["page"])
+                
+                # 마지막 항목이 아니면 API 제한을 위해 대기
+                if i < len(active_channels) - 1:
+                    logger.info("API 제한을 위해 10초 대기")
+                    await asyncio.sleep(10)
+            
+            logger.info("모든 채널 처리 완료")
+        
+        return {
+            "time_setting": time_setting,
+            "active_channels": [
+                {
+                    "channel_name": c["channel_name"],
+                    "keyword": c["keyword"]
+                } for c in active_channels
+            ],
+            "total_active": len(active_channels),
+            "simulate_only": simulate_only
+        }
+    except Exception as e:
+        logger.error(f"시뮬레이션 중 오류 발생: {str(e)}")
+        return {
+            "time_setting": time_setting,
+            "error": str(e),
+            "simulate_only": simulate_only
+        }

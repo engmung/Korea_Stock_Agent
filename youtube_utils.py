@@ -48,34 +48,41 @@ def parse_upload_date(upload_time_text: str) -> datetime:
         return now
     
     try:
+        # 로깅 추가
+        logger.info(f"원본 업로드 시간 텍스트: '{upload_time_text}'")
+        
         # 숫자 추출
         number_match = re.search(r'(\d+)', upload_time_text)
         if not number_match:
+            logger.warning(f"업로드 시간에서 숫자를 추출할 수 없음: '{upload_time_text}'")
             return now
         
         value = int(number_match.group(1))
+        logger.info(f"추출된 숫자: {value}")
         
         # 시간 단위에 따른 계산
+        result_date = now
+        
         if "분 전" in upload_time_text or "minutes ago" in upload_time_text:
-            return now - timedelta(minutes=value)
+            result_date = now - timedelta(minutes=value)
         elif "시간 전" in upload_time_text or "hours ago" in upload_time_text:
-            return now - timedelta(hours=value)
+            result_date = now - timedelta(hours=value)
         elif "일 전" in upload_time_text or "days ago" in upload_time_text:
-            return now - timedelta(days=value)
+            result_date = now - timedelta(days=value)
         elif "주 전" in upload_time_text or "weeks ago" in upload_time_text:
-            return now - timedelta(weeks=value)
+            result_date = now - timedelta(weeks=value)
         elif "개월 전" in upload_time_text or "months ago" in upload_time_text:
-            return now - timedelta(days=value*30)
+            result_date = now - timedelta(days=value*30)
         elif "년 전" in upload_time_text or "years ago" in upload_time_text:
-            return now - timedelta(days=value*365)
+            result_date = now - timedelta(days=value*365)
         else:
-            # 직접적인 날짜 형식 처리 (예: "2024년 3월 13일")
+            # 직접적인 날짜 형식 처리
             date_match = re.search(r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일', upload_time_text)
             if date_match:
                 year, month, day = map(int, date_match.groups())
-                return datetime(year, month, day)
+                result_date = datetime(year, month, day)
             
-            # 영어 날짜 형식 처리 (예: "Mar 13, 2024")
+            # 영어 날짜 형식 처리
             eng_date_match = re.search(r'([A-Za-z]{3})\s*(\d{1,2}),?\s*(\d{4})', upload_time_text)
             if eng_date_match:
                 month_str, day, year = eng_date_match.groups()
@@ -84,21 +91,25 @@ def parse_upload_date(upload_time_text: str) -> datetime:
                     'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
                 }
                 month = month_dict.get(month_str, 1)
-                return datetime(int(year), month, int(day))
+                result_date = datetime(int(year), int(day), month)
+        
+        logger.info(f"변환된 날짜: {result_date.isoformat()}")
+        return result_date
+        
     except Exception as e:
-        logger.error(f"날짜 파싱 오류: {str(e)}")
+        logger.error(f"날짜 파싱 오류: {str(e)}, 입력: '{upload_time_text}'")
     
     return now
 
 def find_videos_with_keyword(data: dict, keyword: str) -> List[Dict[str, Any]]:
-    """Extract video information with the given keyword from YouTube initial data."""
+    """키워드가 포함된 영상 정보를 YouTube 초기 데이터에서 추출합니다."""
     videos = []
     
     try:
-        # Search possible paths
+        # 가능한 경로 검색
         tab_renderers = None
         
-        # Find tab renderer
+        # 탭 렌더러 찾기
         if "contents" in data:
             if "twoColumnBrowseResultsRenderer" in data["contents"]:
                 if "tabs" in data["contents"]["twoColumnBrowseResultsRenderer"]:
@@ -108,50 +119,50 @@ def find_videos_with_keyword(data: dict, keyword: str) -> List[Dict[str, Any]]:
                     tab_renderers = [{"tabRenderer": {"content": data["contents"]["sectionListRenderer"]}}]
         
         if not tab_renderers:
-            logger.warning("Could not find tab renderers.")
+            logger.warning("탭 렌더러를 찾을 수 없습니다.")
             return videos
         
-        # Examine each tab
+        # 각 탭 검사
         for tab in tab_renderers:
             if "tabRenderer" not in tab:
                 continue
             
-            # Extract content
+            # 콘텐츠 추출
             content = tab["tabRenderer"].get("content", {})
             
-            # Section list renderer
+            # 섹션 리스트 렌더러
             if "sectionListRenderer" in content:
                 for section in content["sectionListRenderer"].get("contents", []):
-                    # Item section renderer
+                    # 아이템 섹션 렌더러
                     if "itemSectionRenderer" in section:
                         for content_item in section["itemSectionRenderer"].get("contents", []):
-                            # Grid renderer
+                            # 그리드 렌더러
                             if "gridRenderer" in content_item:
                                 for item in content_item["gridRenderer"].get("items", []):
-                                    # Extract video info (grid format)
+                                    # 비디오 정보 추출 (그리드 형식)
                                     if "gridVideoRenderer" in item:
                                         video_renderer = item["gridVideoRenderer"]
                                         
-                                        # Extract title
+                                        # 제목 추출
                                         title = ""
                                         if "title" in video_renderer and "runs" in video_renderer["title"]:
                                             for run in video_renderer["title"]["runs"]:
                                                 title += run.get("text", "")
                                         
-                                        # Check keyword
+                                        # 키워드 확인
                                         if keyword.lower() in title.lower():
-                                            # Extract video ID
+                                            # 비디오 ID 추출
                                             video_id = video_renderer.get("videoId", "")
                                             
-                                            # Create URL
+                                            # URL 생성
                                             video_url = f"https://www.youtube.com/watch?v={video_id}"
                                             
-                                            # Extract upload time
+                                            # 업로드 시간 추출
                                             upload_time = ""
                                             if "publishedTimeText" in video_renderer:
                                                 upload_time = video_renderer["publishedTimeText"].get("simpleText", "")
                                             
-                                            # Check live info
+                                            # 라이브 정보 확인
                                             is_upcoming = False
                                             is_live = False
                                             
@@ -165,7 +176,7 @@ def find_videos_with_keyword(data: dict, keyword: str) -> List[Dict[str, Any]]:
                                                             elif status_renderer["style"] == "LIVE":
                                                                 is_live = True
                                             
-                                            # Extract video length
+                                            # 영상 길이 추출
                                             video_length = "Unknown"
                                             if "lengthText" in video_renderer:
                                                 if "simpleText" in video_renderer["lengthText"]:
@@ -180,32 +191,32 @@ def find_videos_with_keyword(data: dict, keyword: str) -> List[Dict[str, Any]]:
                                                 "is_live": is_live,
                                                 "video_length": video_length
                                             })
-                                            logger.info(f"Found matching video: {title} {'(Upcoming)' if is_upcoming else '(Live)' if is_live else ''}")
+                                            logger.info(f"매칭된 영상 발견: {title} {'(예정)' if is_upcoming else '(라이브)' if is_live else ''}")
                             
-                            # Regular video info extraction (list format)
+                            # 일반 비디오 정보 추출 (리스트 형식)
                             elif "videoRenderer" in content_item:
                                 video_renderer = content_item["videoRenderer"]
                                 
-                                # Extract title
+                                # 제목 추출
                                 title = ""
                                 if "title" in video_renderer and "runs" in video_renderer["title"]:
                                     for run in video_renderer["title"]["runs"]:
                                         title += run.get("text", "")
                                 
-                                # Check keyword
+                                # 키워드 확인
                                 if keyword.lower() in title.lower():
-                                    # Extract video ID
+                                    # 비디오 ID 추출
                                     video_id = video_renderer.get("videoId", "")
                                     
-                                    # Create URL
+                                    # URL 생성
                                     video_url = f"https://www.youtube.com/watch?v={video_id}"
                                     
-                                    # Extract upload time
+                                    # 업로드 시간 추출
                                     upload_time = ""
                                     if "publishedTimeText" in video_renderer:
                                         upload_time = video_renderer["publishedTimeText"].get("simpleText", "")
                                     
-                                    # Check live info
+                                    # 라이브 정보 확인
                                     is_upcoming = False
                                     is_live = False
                                     
@@ -226,7 +237,7 @@ def find_videos_with_keyword(data: dict, keyword: str) -> List[Dict[str, Any]]:
                                                     elif status_renderer["style"] == "LIVE":
                                                         is_live = True
                                     
-                                    # Extract video length
+                                    # 영상 길이 추출
                                     video_length = "Unknown"
                                     if "lengthText" in video_renderer:
                                         if "simpleText" in video_renderer["lengthText"]:
@@ -241,39 +252,39 @@ def find_videos_with_keyword(data: dict, keyword: str) -> List[Dict[str, Any]]:
                                         "is_live": is_live,
                                         "video_length": video_length
                                     })
-                                    logger.info(f"Found matching video: {title} {'(Upcoming)' if is_upcoming else '(Live)' if is_live else ''}")
+                                    logger.info(f"매칭된 영상 발견: {title} {'(예정)' if is_upcoming else '(라이브)' if is_live else ''}")
             
-            # Rich grid renderer
+            # 리치 그리드 렌더러
             elif "richGridRenderer" in content:
                 for item in content["richGridRenderer"].get("contents", []):
                     if "richItemRenderer" in item:
                         if "content" in item["richItemRenderer"]:
                             content_item = item["richItemRenderer"]["content"]
                             
-                            # Extract video info
+                            # 비디오 정보 추출
                             if "videoRenderer" in content_item:
                                 video_renderer = content_item["videoRenderer"]
                                 
-                                # Extract title
+                                # 제목 추출
                                 title = ""
                                 if "title" in video_renderer and "runs" in video_renderer["title"]:
                                     for run in video_renderer["title"]["runs"]:
                                         title += run.get("text", "")
                                 
-                                # Check keyword
+                                # 키워드 확인
                                 if keyword.lower() in title.lower():
-                                    # Extract video ID
+                                    # 비디오 ID 추출
                                     video_id = video_renderer.get("videoId", "")
                                     
-                                    # Create URL
+                                    # URL 생성
                                     video_url = f"https://www.youtube.com/watch?v={video_id}"
                                     
-                                    # Extract upload time
+                                    # 업로드 시간 추출
                                     upload_time = ""
                                     if "publishedTimeText" in video_renderer:
                                         upload_time = video_renderer["publishedTimeText"].get("simpleText", "")
                                     
-                                    # Check live info
+                                    # 라이브 정보 확인
                                     is_upcoming = False
                                     is_live = False
                                     
@@ -294,7 +305,7 @@ def find_videos_with_keyword(data: dict, keyword: str) -> List[Dict[str, Any]]:
                                                     elif status_renderer["style"] == "LIVE":
                                                         is_live = True
                                     
-                                    # Extract video length
+                                    # 영상 길이 추출
                                     video_length = "Unknown"
                                     if "lengthText" in video_renderer:
                                         if "simpleText" in video_renderer["lengthText"]:
@@ -309,21 +320,21 @@ def find_videos_with_keyword(data: dict, keyword: str) -> List[Dict[str, Any]]:
                                         "is_live": is_live,
                                         "video_length": video_length
                                     })
-                                    logger.info(f"Found matching video: {title} {'(Upcoming)' if is_upcoming else '(Live)' if is_live else ''}")
+                                    logger.info(f"매칭된 영상 발견: {title} {'(예정)' if is_upcoming else '(라이브)' if is_live else ''}")
         
-        # Sort videos (Live > Regular videos > Upcoming)
+        # 영상 정렬 (라이브 > 일반 영상 > 예정)
         videos.sort(key=lambda v: (
             -1 if v.get("is_live", False) else (1 if v.get("is_upcoming", False) else 0)
         ))
         
         return videos
     except Exception as e:
-        logger.error(f"Error extracting video info: {str(e)}")
+        logger.error(f"영상 정보 추출 중 오류: {str(e)}")
         return videos
 
 async def process_channel_url(channel_url: str, keyword: str, max_retries: int = 3, timeout: float = 30.0) -> Optional[Dict[str, Any]]:
     """채널 URL에서 키워드가 포함된 최신 영상을 찾습니다."""
-    logger.info(f"Processing channel URL: {channel_url} with keyword: {keyword}")
+    logger.info(f"채널 URL 처리: {channel_url}, 키워드: {keyword}")
     
     # channel URL에서 streams 경로가 없으면 추가
     if not channel_url.endswith("/streams") and not channel_url.endswith("/videos"):
@@ -339,7 +350,7 @@ async def process_channel_url(channel_url: str, keyword: str, max_retries: int =
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient() as client:
-                logger.info(f"Fetching channel page (attempt {attempt+1}/{max_retries})")
+                logger.info(f"채널 페이지 가져오기 시도 ({attempt+1}/{max_retries})")
                 response = await client.get(
                     channel_url, 
                     headers=headers, 
@@ -387,26 +398,26 @@ async def process_channel_url(channel_url: str, keyword: str, max_retries: int =
                 
                 # 가장 최근 일반 영상 선택
                 latest_video = normal_videos[0]
-                logger.info(f"Found regular video: {latest_video['title']}")
+                logger.info(f"일반 영상 발견: {latest_video['title']}")
                 return latest_video
                 
         except httpx.TimeoutException:
-            logger.warning(f"Timeout when fetching channel page (attempt {attempt+1}/{max_retries})")
+            logger.warning(f"채널 페이지 가져오기 시간 초과 ({attempt+1}/{max_retries})")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
-                logger.error(f"Max retries reached when fetching channel: {channel_url}")
+                logger.error(f"채널 가져오기 최대 재시도 횟수 도달: {channel_url}")
                 return None
                 
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
+            logger.error(f"HTTP 오류: {e.response.status_code} - {e.response.text}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
                 return None
                 
         except Exception as e:
-            logger.error(f"Error processing channel: {str(e)}")
+            logger.error(f"채널 처리 중 오류: {str(e)}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
@@ -416,24 +427,24 @@ async def process_channel_url(channel_url: str, keyword: str, max_retries: int =
 
 async def get_video_transcript(video_id: str, max_retries: int = 3) -> str:
     """비디오 ID로부터 자막을 가져옵니다."""
-    logger.info(f"Getting transcript for video ID: {video_id}")
+    logger.info(f"영상 ID에 대한 자막 가져오기: {video_id}")
     
     for attempt in range(max_retries):
         try:
             # 한국어 자막 시도
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["ko"])
-            logger.info(f"Found Korean transcript with {len(transcript_list)} entries")
+            logger.info(f"{len(transcript_list)}개 항목의 한국어 자막을 찾았습니다")
             return " ".join([entry["text"] for entry in transcript_list])
         except Exception as e:
-            logger.warning(f"Korean transcript error (attempt {attempt+1}/{max_retries}): {str(e)}")
+            logger.warning(f"한국어 자막 오류 (시도 {attempt+1}/{max_retries}): {str(e)}")
             
             try:
                 # 자동 언어 감지 시도
                 transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-                logger.info(f"Found transcript with auto-detected language")
+                logger.info(f"자동 감지 언어로 자막을 찾았습니다")
                 return " ".join([entry["text"] for entry in transcript_list])
             except Exception as e2:
-                logger.error(f"Auto-detect transcript error (attempt {attempt+1}/{max_retries}): {str(e2)}")
+                logger.error(f"자동 감지 자막 오류 (시도 {attempt+1}/{max_retries}): {str(e2)}")
                 
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
