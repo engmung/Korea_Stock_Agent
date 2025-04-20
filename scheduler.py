@@ -102,26 +102,14 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         # 이미 스크립트가 있는지 영상 URL로 확인
         if await check_script_exists(latest_video["url"]):
             print(f"이미 스크립트가 존재합니다: {latest_video['title']}")
-            
-            # 스크립트가 이미 존재하면 활성화 상태를 비활성화로 변경
-            await update_notion_page(page_id, {
-                "활성화": {"checkbox": False}
-            })
-            print(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
-            
+            # 채널은 활성 상태로 유지
             return True
         
         # 최근 5일 이내의 스크립트 중 동일한 프로그램의 동일한 영상이 이미 처리되었는지 확인
         five_days_ago = datetime.now() - timedelta(days=5)
         if await check_recent_scripts_for_title(keyword, latest_video["url"], five_days_ago.isoformat()):
             print(f"최근 5일 이내에 동일한 프로그램의 동일한 영상이 이미 처리되었습니다: {latest_video['title']}")
-            
-            # 스크립트가 이미 존재하면 활성화 상태를 비활성화로 변경
-            await update_notion_page(page_id, {
-                "활성화": {"checkbox": False}
-            })
-            print(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
-            
+            # 채널은 활성 상태로 유지
             return True
         
         # 스크립트 가져오기
@@ -220,18 +208,10 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         
         if script_page:
             print(f"스크립트+보고서 페이지 생성 완료: {latest_video['title']}")
-            
-            # 스크립트 생성 성공 시 채널 비활성화
-            await update_notion_page(page_id, {
-                "활성화": {"checkbox": False}
-            })
-            print(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
-            
+            # 스크립트 생성 성공해도 채널은 활성 상태로 유지
             return True
         else:
             print(f"스크립트+보고서 페이지 생성 실패: {latest_video['title']}")
-            # 페이지 생성에 실패한 경우 활성화 상태 유지
-            print(f"스크립트 생성 실패로 채널 '{channel_name}'을 활성화 상태로 유지합니다.")
             return False
         
     except Exception as e:
