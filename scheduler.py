@@ -55,19 +55,7 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         channel_name = "기타"
         channel_property = properties.get("채널명", {})
         if "select" in channel_property and channel_property["select"]:
-            channel_name = channel_property["select"]["name"]
-            
-        # 콘텐츠 유형 가져오기
-        content_type = "단독 진행"
-        content_type_property = properties.get("콘텐츠 유형", {})
-        if "select" in content_type_property and content_type_property["select"]:
-            content_type = content_type_property["select"]["name"]
-            
-        # 투자 스타일 가져오기
-        investment_style = []
-        style_property = properties.get("투자 스타일", {})
-        if "multi_select" in style_property:
-            investment_style = [item["name"] for item in style_property["multi_select"]]
+            channel_name = properties["채널명"]["select"]["name"]
         
         if not channel_url or not keyword:
             print(f"채널 URL 또는 키워드가 없습니다. 스킵합니다.")
@@ -98,19 +86,25 @@ async def process_channel(page: Dict[str, Any]) -> bool:
             status = "라이브 예정" if latest_video.get("is_upcoming", False) else "라이브 중"
             print(f"{status} 영상입니다: {latest_video['title']}. 활성화 상태 유지하고 다음에 다시 확인합니다.")
             return False
-        
+
         # 이미 스크립트가 있는지 영상 URL로 확인
         if await check_script_exists(latest_video["url"]):
             print(f"이미 스크립트가 존재합니다: {latest_video['title']}")
-            # 채널은 활성 상태로 유지
-            return True
-        
+            
+            # 중요: 이미 처리된 영상이지만 활성화 상태 유지 (새 영상이 올라오면 처리하기 위해)
+            print(f"채널 {channel_name}의 활성화 상태를 유지합니다 (새 영상 기다림).")
+            
+            return False  # 활성화 유지를 위해 False 반환
+
         # 최근 5일 이내의 스크립트 중 동일한 프로그램의 동일한 영상이 이미 처리되었는지 확인
         five_days_ago = datetime.now() - timedelta(days=5)
         if await check_recent_scripts_for_title(keyword, latest_video["url"], five_days_ago.isoformat()):
             print(f"최근 5일 이내에 동일한 프로그램의 동일한 영상이 이미 처리되었습니다: {latest_video['title']}")
-            # 채널은 활성 상태로 유지
-            return True
+            
+            # 중요: 이미 처리된 영상이지만 활성화 상태 유지 (새 영상이 올라오면 처리하기 위해)
+            print(f"채널 {channel_name}의 활성화 상태를 유지합니다 (새 영상 기다림).")
+            
+            return False  # 활성화 유지를 위해 False 반환
         
         # 스크립트 가져오기
         try:
@@ -208,41 +202,45 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         
         if script_page:
             print(f"스크립트+보고서 페이지 생성 완료: {latest_video['title']}")
-            # 스크립트 생성 성공해도 채널은 활성 상태로 유지
+            
+            # 스크립트 생성 성공 시에만 채널 비활성화
+            await update_notion_page(page_id, {
+                "활성화": {"checkbox": False}
+            })
+            print(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
+            
             return True
         else:
             print(f"스크립트+보고서 페이지 생성 실패: {latest_video['title']}")
+            # 페이지 생성에 실패한 경우 활성화 상태 유지
+            print(f"스크립트 생성 실패로 채널 '{channel_name}'을 활성화 상태로 유지합니다.")
             return False
         
     except Exception as e:
         print(f"채널 처리 중 오류: {str(e)}")
         return False
 
-async def process_channels_by_setting(specific_hour: int = None) -> None:
-    """모든 활성화된 채널을 처리합니다. 현재 시간에 해당하는 팀의 채널만 처리합니다."""
-    # 현재 시간 가져오기
-    if specific_hour is None:
+async def process_channels_by_setting(current_hour: int = None) -> None:
+    """
+    현재 시간에 처리해야 할 활성화된 채널을 처리합니다.
+    
+    Args:
+        current_hour: 현재 시간 (0-23, None인 경우 현재 시간 사용)
+    """
+    # 현재 시간 설정
+    if current_hour is None:
         current_hour = datetime.now().hour
-    else:
-        current_hour = specific_hour
     
-    # 4시에는 초기화 작업이 실행되므로 채널 처리를 건너뜀
-    if current_hour == 4:
-        print("4시에는 초기화 작업이 실행되므로 채널 처리를 건너뜁니다.")
-        return
-    
-    # 현재 시간에 처리할 팀 번호 계산 (1, 2, 3 중 하나)
-    team_to_process = (current_hour % 3) + 1
-    
-    print(f"채널 처리 시작 - {current_hour}시, 팀 {team_to_process} 처리")
+    print(f"채널 처리 시작 - 현재 시간: {current_hour}시")
     
     try:
         # 참고용 DB의 모든 채널 가져오기
         reference_pages = await query_notion_database(REFERENCE_DB_ID)
         print(f"참고용 DB에서 {len(reference_pages)}개의 채널을 가져왔습니다.")
         
-        # 활성화된 채널만 선택
-        active_channels = []
+        # 활성화된 채널 중 현재 시간에 처리해야 할 채널만 선택
+        time_relevant_channels = []
+        
         for page in reference_pages:
             properties = page.get("properties", {})
             
@@ -252,42 +250,48 @@ async def process_channels_by_setting(specific_hour: int = None) -> None:
             if "checkbox" in active_property:
                 is_active = active_property["checkbox"]
             
-            if is_active:
-                active_channels.append(page)
-        
-        print(f"전체 활성화된 채널 {len(active_channels)}개를 찾았습니다.")
-        
-        if not active_channels:
-            print("처리할 활성화된 채널이 없습니다.")
-            return
-        
-        # 현재 시간에 해당하는 팀의 채널만 필터링
-        channels_to_process = []
-        for i, channel in enumerate(active_channels):
-            # 채널의 팀 번호 계산 (1, 2, 3)
-            channel_team = (i % 3) + 1
+            if not is_active:
+                continue
             
-            # 현재 시간에 처리할 팀에 속하는 채널만 선택
-            if channel_team == team_to_process:
-                channels_to_process.append(channel)
+            # 시간 설정 확인
+            channel_hour = 9  # 기본값: 9시
+            time_property = properties.get("시간", {})
+            if "number" in time_property and time_property["number"] is not None:
+                channel_hour = int(time_property["number"])
+            
+            # 시간 유효성 검사
+            if channel_hour < 0 or channel_hour > 23:
+                channel_hour = 9  # 잘못된 시간 설정은 9시로 기본값 설정
+            
+            # 현재 시간이 지정된 시간 또는 그 후 3시간 이내인 경우만 처리
+            time_window = 3  # 3시간 윈도우
+            hours_since_channel_time = (current_hour - channel_hour) % 24  # 24시간 기준 차이
+            
+            if hours_since_channel_time <= time_window:
+                channel_name = "기타"
+                if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
+                    channel_name = properties["채널명"]["select"]["name"]
+                
+                print(f"채널 '{channel_name}'은 {channel_hour}시 설정이며, 현재 {current_hour}시는 처리 가능한 시간대입니다.")
+                time_relevant_channels.append(page)
         
-        print(f"팀 {team_to_process}에 속한 처리할 채널 {len(channels_to_process)}개를 찾았습니다.")
+        print(f"현재 시간({current_hour}시)에 처리할 활성화된 채널 {len(time_relevant_channels)}개를 찾았습니다.")
         
-        if not channels_to_process:
-            print(f"팀 {team_to_process}에 처리할 채널이 없습니다.")
+        if not time_relevant_channels:
+            print(f"현재 시간({current_hour}시)에 처리할 활성화된 채널이 없습니다.")
             return
         
         # 채널 처리 - API 제한 고려하여 순차적으로 처리
         success_count = 0
         
-        for index, channel_page in enumerate(channels_to_process):
+        for index, channel_page in enumerate(time_relevant_channels):
             try:
                 channel_name = "Unknown"
                 properties = channel_page.get("properties", {})
                 if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
                     channel_name = properties["채널명"]["select"]["name"]
                     
-                print(f"채널 처리 시작 ({index+1}/{len(channels_to_process)}): {channel_name}")
+                print(f"채널 처리 시작 ({index+1}/{len(time_relevant_channels)}): {channel_name}")
                 success = await process_channel(channel_page)
                 
                 if success:
@@ -298,18 +302,18 @@ async def process_channels_by_setting(specific_hour: int = None) -> None:
                     
                 # 다음 채널 처리 전 대기
                 # 마지막 항목이 아니면 대기
-                if index < len(channels_to_process) - 1:
+                if index < len(time_relevant_channels) - 1:
                     print(f"API 제한 준수를 위해 2초 대기 중...")
                     await asyncio.sleep(2)
                     
             except Exception as e:
                 print(f"채널 처리 중 예외 발생: {str(e)}")
                 # 다음 채널 처리 전 대기
-                if index < len(channels_to_process) - 1:
+                if index < len(time_relevant_channels) - 1:
                     print(f"오류 후 API 제한 준수를 위해 2초 대기 중...")
                     await asyncio.sleep(2)
         
-        print(f"처리 완료: {success_count}/{len(channels_to_process)} 채널 성공")
+        print(f"처리 완료: {success_count}/{len(time_relevant_channels)} 채널 성공")
     except Exception as e:
         print(f"process_channels_by_setting 실행 중 오류: {str(e)}")
 
@@ -340,19 +344,19 @@ def setup_scheduler() -> AsyncIOScheduler:
         replace_existing=True
     )
     
-    # 매시간 정각에 작업 실행 (0-23시) - 4시는 제외
+    # 매시간 정각에 작업 실행 (0-23시)
     for hour in range(24):
-        if hour != 4:  # 4시 제외
-            scheduler.add_job(
-                process_channels_by_setting,
-                CronTrigger(hour=hour, minute=0),
-                id=f"process_channels_{hour}",
-                replace_existing=True
-            )
+        # 현재 시간을 인자로 전달
+        scheduler.add_job(
+            lambda h=hour: asyncio.create_task(process_channels_by_setting(h)),
+            CronTrigger(hour=hour, minute=0),
+            id=f"process_channels_{hour}",
+            replace_existing=True
+        )
     
     # 스케줄러 시작
     scheduler.start()
-    print("스케줄러가 설정되었습니다. 4시에는 채널 초기화만 수행합니다.")
+    print("Scheduler has been set up and is running.")
     
     return scheduler
 
@@ -361,27 +365,13 @@ async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = Tr
     print(f"시간 설정 {time_setting}에 대한 작업 시뮬레이션")
     
     try:
-        # 4시인 경우 초기화만 수행함을 알림
-        if time_setting == 4:
-            print("4시에는 초기화 작업만 수행되며, 채널 처리는 진행되지 않습니다.")
-            return {
-                "time_setting": time_setting,
-                "message": "4시에는 초기화 작업만 수행되며, 채널 처리는 진행되지 않습니다.",
-                "active_channels": [],
-                "total_active": 0,
-                "simulate_only": simulate_only
-            }
-        
-        # 현재 시간에 처리할 팀 번호 계산 (1, 2, 3 중 하나)
-        team_to_process = (time_setting % 3) + 1
-        
         # 참고용 DB의 모든 채널 조회
         reference_pages = await query_notion_database(REFERENCE_DB_ID)
         print(f"테스트: {len(reference_pages)}개의 채널을 가져왔습니다.")
         
-        # 활성화된 채널 찾기
+        # 활성화된 채널 중 현재 시간에 관련된 채널만 찾기
         active_channels = []
-        for i, page in enumerate(reference_pages):
+        for page in reference_pages:
             properties = page.get("properties", {})
             
             # 활성화 상태 확인
@@ -390,10 +380,24 @@ async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = Tr
             if "checkbox" in active_property:
                 is_active = active_property["checkbox"]
             
-            # 채널의 팀 번호 계산 (1-기반 인덱스)
-            channel_team = (i % 3) + 1
+            if not is_active:
+                continue
             
-            if is_active and channel_team == team_to_process:
+            # 시간 설정 확인
+            channel_hour = 9  # 기본값: 9시
+            time_property = properties.get("시간", {})
+            if "number" in time_property and time_property["number"] is not None:
+                channel_hour = int(time_property["number"])
+            
+            # 시간 유효성 검사
+            if channel_hour < 0 or channel_hour > 23:
+                channel_hour = 9  # 잘못된 시간 설정은 9시로 기본값 설정
+            
+            # 현재 시간이 지정된 시간 또는 그 후 3시간 이내인 경우만 처리
+            time_window = 3  # 3시간 윈도우
+            hours_since_channel_time = (time_setting - channel_hour) % 24  # 24시간 기준 차이
+            
+            if hours_since_channel_time <= time_window:
                 # 채널명과 키워드 가져오기
                 channel_name = "기타"
                 if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
@@ -403,15 +407,17 @@ async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = Tr
                 if "제목" in properties and "title" in properties["제목"] and properties["제목"]["title"]:
                     keyword = properties["제목"]["title"][0]["plain_text"].strip()
                 
+                print(f"채널 '{channel_name}'은 {channel_hour}시 설정이며, 지정 시간 {time_setting}시는 처리 가능한 시간대입니다.")
+                
                 active_channels.append({
                     "channel_name": channel_name,
                     "keyword": keyword,
+                    "channel_hour": channel_hour,
                     "page_id": page.get("id"),
-                    "page": page,
-                    "team": channel_team
+                    "page": page
                 })
         
-        print(f"시간 {time_setting}시에 처리할 팀 {team_to_process}의 활성화된 채널 {len(active_channels)}개 찾음")
+        print(f"시간 {time_setting}시에 처리할 활성화된 채널 {len(active_channels)}개 찾음")
         
         if not simulate_only and active_channels:
             # 실제 실행 모드
@@ -429,12 +435,11 @@ async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = Tr
         
         return {
             "time_setting": time_setting,
-            "team_to_process": team_to_process,
             "active_channels": [
                 {
                     "channel_name": c["channel_name"],
                     "keyword": c["keyword"],
-                    "team": c["team"]
+                    "channel_hour": c["channel_hour"]
                 } for c in active_channels
             ],
             "total_active": len(active_channels),
@@ -445,6 +450,5 @@ async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = Tr
         return {
             "time_setting": time_setting,
             "error": str(e),
-            "simulate_only": simulate_only,
-            "team_to_process": (time_setting % 3) + 1
+            "simulate_only": simulate_only
         }
