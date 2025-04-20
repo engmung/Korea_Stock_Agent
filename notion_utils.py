@@ -15,8 +15,6 @@ load_dotenv()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 REFERENCE_DB_ID = os.getenv("REFERENCE_DB_ID")
 SCRIPT_DB_ID = os.getenv("SCRIPT_DB_ID")
-INVESTMENT_AGENT_DB_ID = os.getenv("INVESTMENT_AGENT_DB_ID")
-INVESTMENT_PERFORMANCE_DB_ID = os.getenv("INVESTMENT_PERFORMANCE_DB_ID")
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +242,66 @@ async def create_script_report_page(database_id: str, properties: Dict[str, Any]
                     return None
         
         return None
+    
+# 원래 함수명을 유지하면서 기능을 개선합니다
+async def check_recent_scripts_for_title(program_name: str, video_url: str = None, since_date: str = None) -> bool:
+    """
+    최근 특정 날짜 이후의 스크립트 중에서 동일한 프로그램의 동일한 영상이 이미 처리되었는지 확인합니다.
+    
+    Args:
+        program_name: 프로그램 키워드(예: '김정수', '모닝 스탠바이')
+        video_url: 확인할 영상 URL (None이면 프로그램명만 체크)
+        since_date: ISO 형식의 날짜 문자열(예: 2024-04-15T00:00:00Z)
+        
+    Returns:
+        동일한 영상이 이미 처리되었으면 True, 아니면 False
+    """
+    # since_date가 없으면 모든 기간 검색
+    filter_conditions = []
+    
+    if since_date:
+        filter_conditions.append({
+            "property": "영상 날짜",
+            "date": {
+                "on_or_after": since_date
+            }
+        })
+    
+    # 프로그램명으로 필터링
+    filter_conditions.append({
+        "property": "제목",
+        "title": {
+            "equals": program_name
+        }
+    })
+    
+    # 필터 구성
+    request_body = {
+        "filter": {
+            "and": filter_conditions
+        }
+    }
+    
+    # 스크립트 조회
+    scripts = await query_notion_database(SCRIPT_DB_ID, request_body)
+    
+    # URL이 제공되지 않았으면 프로그램명만으로 존재 여부 확인
+    if not video_url:
+        return len(scripts) > 0
+    
+    # URL까지 비교
+    for script in scripts:
+        properties = script.get("properties", {})
+        
+        # URL 속성 확인
+        if "URL" in properties and "url" in properties["URL"]:
+            script_url = properties["URL"]["url"]
+            
+            # 동일한 URL이면 이미 처리된 영상
+            if script_url == video_url:
+                return True
+    
+    return False
 
 async def update_notion_page(page_id: str, properties: Dict[str, Any], max_retries: int = 3, timeout: float = 30.0) -> bool:
     """

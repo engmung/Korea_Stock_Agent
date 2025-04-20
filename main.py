@@ -1,33 +1,21 @@
 import os
-import logging
-from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 # 환경 변수 로드
 load_dotenv()
 
-# 로깅 설정
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
-
 # 모듈화된 컴포넌트 임포트
 from scheduler import setup_scheduler, simulate_scheduler_at_time, process_channels_by_setting
 from notion_utils import (
-    query_notion_database, 
-    create_investment_agent, 
-    create_investment_performance,
+    query_notion_database,
     REFERENCE_DB_ID, 
-    SCRIPT_DB_ID,
-    INVESTMENT_AGENT_DB_ID,
-    INVESTMENT_PERFORMANCE_DB_ID
+    SCRIPT_DB_ID
 )
+from historical_data_processor import process_all_channels_historical_data
 
 app = FastAPI(title="투자 의사결정 지원 시스템")
 
@@ -47,25 +35,22 @@ class NotionSyncResponse(BaseModel):
     message: str
 
 class SimulateRequest(BaseModel):
-    time_setting: int
-    simulate_only: bool = True
+    time_setting: int = Field(
+        9, 
+        description="시뮬레이션할 시간 설정 (0-23 사이의 정수)", 
+        ge=0, 
+        le=23
+    )
+    simulate_only: bool = Field(
+        True, 
+        description="실제 채널 처리 실행 여부 (True: 시뮬레이션만, False: 실제 실행)"
+    )
 
-class CreateAgentRequest(BaseModel):
-    agent_id: str
-    investment_philosophy: str
-    status: str = "활성"
-
-class CreatePerformanceRequest(BaseModel):
-    title: str
-    agent_id: str
-    agent_id_relation: str
-    start_date: str
-    end_date: str
-    stocks: list
-    weights: str
-    total_return: float
-    max_drawdown: float
-    evaluation: str
+class HistoricalDataRequest(BaseModel):
+    videos_per_channel: int = 500
+    process_limit_per_channel: int = 20
+    target_programs: Optional[List[str]] = None
+    concurrent_channels: int = 3
 
 @app.get("/")
 async def root():
@@ -76,93 +61,36 @@ async def sync_channels(background_tasks: BackgroundTasks):
     """모든 채널에 대해 콘텐츠를 추출하고 분석합니다."""
     try:
         # 백그라운드 작업으로 실행
-        logger.info("채널 동기화 작업 시작")
         background_tasks.add_task(process_channels_by_setting)
         return {"status": "processing", "message": "동기화 작업이 시작되었습니다. 완료까지 시간이 걸릴 수 있습니다."}
     
     except Exception as e:
-        logger.error(f"채널 동기화 중 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=f"채널 동기화 중 오류가 발생했습니다: {str(e)}")
 
 @app.post("/run-now")
 async def run_now():
     """지금 바로 채널 처리 작업을 실행합니다."""
     try:
-        logger.info("즉시 채널 처리 작업 실행")
         await process_channels_by_setting()
         return {"status": "success", "message": "채널 처리 작업이 실행되었습니다."}
     except Exception as e:
-        logger.error(f"즉시 실행 중 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=f"즉시 실행 중 오류가 발생했습니다: {str(e)}")
 
-@app.post("/simulate")
-async def simulate(request: Dict[str, Any]):
+@app.post("/simulate", description="특정 시간 설정에 대한 작업 시뮬레이션. 시간을 지정하여 해당 시간에 어떤 채널이 처리될지 확인하거나 실제로 처리합니다.")
+async def simulate(request: SimulateRequest):
     """특정 시간 설정에 대한 작업 시뮬레이션"""
     try:
-        time_setting = request.get("time_setting", datetime.now().hour)
-        simulate_only = request.get("simulate_only", True)
-        
-        logger.info(f"시뮬레이션 요청: time_setting={time_setting}, simulate_only={simulate_only}")
+        time_setting = request.time_setting
+        simulate_only = request.simulate_only
         
         result = await simulate_scheduler_at_time(time_setting, simulate_only)
-        return {"status": "success", "result": result}
+        return {
+            "status": "success", 
+            "message": f"시간 {time_setting}시 설정에 대한 {'시뮬레이션' if simulate_only else '실행'} 완료",
+            "result": result
+        }
     except Exception as e:
-        logger.error(f"시뮬레이션 중 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=f"시뮬레이션 중 오류가 발생했습니다: {str(e)}")
-
-@app.post("/agents")
-async def create_agent(request: CreateAgentRequest):
-    """새 투자 에이전트 생성"""
-    try:
-        agent_data = {
-            "agent_id": request.agent_id,
-            "investment_philosophy": request.investment_philosophy,
-            "status": request.status,
-            "avg_return": 0,
-            "success_rate": 0
-        }
-        
-        result = await create_investment_agent(agent_data)
-        
-        if not result:
-            raise HTTPException(status_code=500, detail="에이전트 생성에 실패했습니다")
-        
-        return {"status": "success", "message": f"에이전트 {request.agent_id} 생성 완료", "agent_id": result.get("id")}
-    
-    except Exception as e:
-        logger.error(f"에이전트 생성 중 오류: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"에이전트 생성 중 오류가 발생했습니다: {str(e)}")
-
-@app.post("/performances")
-async def create_performance(request: CreatePerformanceRequest):
-    """새 투자 실적 기록 생성"""
-    try:
-        # 날짜 문자열을 datetime 객체로 변환
-        start_date = datetime.fromisoformat(request.start_date)
-        end_date = datetime.fromisoformat(request.end_date)
-        
-        performance_data = {
-            "title": request.title,
-            "agent_id_relation": request.agent_id_relation,
-            "start_date": start_date,
-            "end_date": end_date,
-            "stocks": request.stocks,
-            "weights": request.weights,
-            "total_return": request.total_return,
-            "max_drawdown": request.max_drawdown,
-            "evaluation": request.evaluation
-        }
-        
-        result = await create_investment_performance(performance_data)
-        
-        if not result:
-            raise HTTPException(status_code=500, detail="투자 실적 기록 생성에 실패했습니다")
-        
-        return {"status": "success", "message": f"투자 실적 {request.title} 생성 완료", "performance_id": result.get("id")}
-    
-    except Exception as e:
-        logger.error(f"투자 실적 생성 중 오류: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"투자 실적 생성 중 오류가 발생했습니다: {str(e)}")
 
 @app.get("/reference-db")
 async def get_reference_db():
@@ -219,7 +147,6 @@ async def get_reference_db():
         return {"status": "success", "channels": channels, "total": len(channels)}
     
     except Exception as e:
-        logger.error(f"참고용 DB 조회 중 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=f"참고용 DB 조회 중 오류가 발생했습니다: {str(e)}")
 
 @app.get("/script-db")
@@ -280,141 +207,53 @@ async def get_script_db():
         return {"status": "success", "scripts": scripts, "total": len(scripts)}
     
     except Exception as e:
-        logger.error(f"스크립트 DB 조회 중 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=f"스크립트 DB 조회 중 오류가 발생했습니다: {str(e)}")
 
-@app.get("/agents")
-async def get_agents():
-    """투자 에이전트 DB의 모든 에이전트 정보 조회"""
+@app.post("/process-historical-data")
+async def process_historical_data(background_tasks: BackgroundTasks, request: HistoricalDataRequest):
+    """
+    과거 데이터를 처리하여 분석 보고서를 Notion DB에 저장합니다
+    YouTube Data API를 활용하여 채널의 과거 영상을 검색하고 분석합니다
+    
+    - videos_per_channel: 각 채널에서 가져올 최대 영상 수 (기본값: 500)
+    - process_limit_per_channel: 각 채널에서 실제로 처리할 최대 영상 수 (기본값: 20)
+    - target_programs: 특정 프로그램 제목 목록 (지정 시 해당 프로그램만 처리)
+    - concurrent_channels: 동시에 처리할 채널 수 (기본값: 3)
+    """
     try:
-        pages = await query_notion_database(INVESTMENT_AGENT_DB_ID)
+        # 병렬 처리 설정 검증
+        concurrent_channels = max(1, min(request.concurrent_channels, 5))  # 1-5 사이로 제한
         
-        agents = []
-        for page in pages:
-            properties = page.get("properties", {})
-            
-            # 필요한 속성 추출
-            agent_info = {
-                "id": page.get("id"),
-                "agent_id": "",
-                "investment_philosophy": "",
-                "creation_date": "",
-                "status": "",
-                "avg_return": 0,
-                "success_rate": 0
+        # 백그라운드 작업으로 실행
+        def run_historical_processor():
+            import asyncio
+            asyncio.run(process_all_channels_historical_data(
+                videos_per_channel=request.videos_per_channel,
+                process_limit_per_channel=request.process_limit_per_channel,
+                target_programs=request.target_programs,
+                concurrent_channels=concurrent_channels
+            ))
+        
+        background_tasks.add_task(run_historical_processor)
+        
+        return {
+            "status": "processing", 
+            "message": "과거 데이터 처리가 백그라운드에서 시작되었습니다. 완료까지 시간이 걸릴 수 있습니다.",
+            "config": {
+                "videos_per_channel": request.videos_per_channel,
+                "process_limit_per_channel": request.process_limit_per_channel,
+                "target_programs": request.target_programs,
+                "concurrent_channels": concurrent_channels
             }
-            
-            # 에이전트 ID
-            if "에이전트 ID" in properties and "title" in properties["에이전트 ID"] and properties["에이전트 ID"]["title"]:
-                agent_info["agent_id"] = properties["에이전트 ID"]["title"][0]["plain_text"]
-            
-            # 투자 철학
-            if "투자 철학" in properties and "rich_text" in properties["투자 철학"] and properties["투자 철학"]["rich_text"]:
-                agent_info["investment_philosophy"] = properties["투자 철학"]["rich_text"][0]["plain_text"]
-            
-            # 생성일
-            if "생성일" in properties and "date" in properties["생성일"] and properties["생성일"]["date"]:
-                agent_info["creation_date"] = properties["생성일"]["date"]["start"]
-            
-            # 현재 상태
-            if "현재 상태" in properties and "select" in properties["현재 상태"] and properties["현재 상태"]["select"]:
-                agent_info["status"] = properties["현재 상태"]["select"]["name"]
-            
-            # 평균 수익률
-            if "평균 수익률" in properties and "number" in properties["평균 수익률"]:
-                agent_info["avg_return"] = properties["평균 수익률"]["number"] or 0
-            
-            # 성공률
-            if "성공률" in properties and "number" in properties["성공률"]:
-                agent_info["success_rate"] = properties["성공률"]["number"] or 0
-            
-            agents.append(agent_info)
-        
-        # 평균 수익률 기준 내림차순 정렬
-        agents.sort(key=lambda x: x["avg_return"] or 0, reverse=True)
-        
-        return {"status": "success", "agents": agents, "total": len(agents)}
+        }
     
     except Exception as e:
-        logger.error(f"에이전트 DB 조회 중 오류: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"에이전트 DB 조회 중 오류가 발생했습니다: {str(e)}")
-
-@app.get("/performances")
-async def get_performances():
-    """투자 실적 DB의 모든 실적 정보 조회"""
-    try:
-        pages = await query_notion_database(INVESTMENT_PERFORMANCE_DB_ID)
-        
-        performances = []
-        for page in pages:
-            properties = page.get("properties", {})
-            
-            # 필요한 속성 추출
-            performance_info = {
-                "id": page.get("id"),
-                "title": "",
-                "agent_id": [],
-                "start_date": "",
-                "end_date": "",
-                "stocks": [],
-                "weights": "",
-                "total_return": 0,
-                "max_drawdown": 0,
-                "evaluation": ""
-            }
-            
-            # 투자 기록
-            if "투자 기록" in properties and "title" in properties["투자 기록"] and properties["투자 기록"]["title"]:
-                performance_info["title"] = properties["투자 기록"]["title"][0]["plain_text"]
-            
-            # 에이전트 ID
-            if "에이전트 ID" in properties and "relation" in properties["에이전트 ID"]:
-                performance_info["agent_id"] = [relation["id"] for relation in properties["에이전트 ID"]["relation"]]
-            
-            # 시작일
-            if "시작일" in properties and "date" in properties["시작일"] and properties["시작일"]["date"]:
-                performance_info["start_date"] = properties["시작일"]["date"]["start"]
-            
-            # 종료일
-            if "종료일" in properties and "date" in properties["종료일"] and properties["종료일"]["date"]:
-                performance_info["end_date"] = properties["종료일"]["date"]["start"]
-            
-            # 투자 종목
-            if "투자 종목" in properties and "multi_select" in properties["투자 종목"]:
-                performance_info["stocks"] = [item["name"] for item in properties["투자 종목"]["multi_select"]]
-            
-            # 투자 비중
-            if "투자 비중" in properties and "rich_text" in properties["투자 비중"] and properties["투자 비중"]["rich_text"]:
-                performance_info["weights"] = properties["투자 비중"]["rich_text"][0]["plain_text"]
-            
-            # 총 수익률
-            if "총 수익률" in properties and "number" in properties["총 수익률"]:
-                performance_info["total_return"] = properties["총 수익률"]["number"] or 0
-            
-            # 최대 낙폭
-            if "최대 낙폭" in properties and "number" in properties["최대 낙폭"]:
-                performance_info["max_drawdown"] = properties["최대 낙폭"]["number"] or 0
-            
-            # 결과 평가
-            if "결과 평가" in properties and "select" in properties["결과 평가"] and properties["결과 평가"]["select"]:
-                performance_info["evaluation"] = properties["결과 평가"]["select"]["name"]
-            
-            performances.append(performance_info)
-        
-        # 종료일 기준 내림차순 정렬
-        performances.sort(key=lambda x: x["end_date"] or "", reverse=True)
-        
-        return {"status": "success", "performances": performances, "total": len(performances)}
-    
-    except Exception as e:
-        logger.error(f"투자 실적 DB 조회 중 오류: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"투자 실적 DB 조회 중 오류가 발생했습니다: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"과거 데이터 처리 시작 중 오류가 발생했습니다: {str(e)}")
 
 @app.on_event("startup")
 async def startup_event():
     """애플리케이션 시작 시 스케줄러 설정"""
     setup_scheduler()
-    logger.info("Application started with scheduler configured")
 
 if __name__ == "__main__":
     import uvicorn

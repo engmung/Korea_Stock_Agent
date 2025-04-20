@@ -1,4 +1,3 @@
-import logging
 import asyncio
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -10,14 +9,14 @@ from notion_utils import (
     update_notion_page, 
     check_script_exists, 
     create_script_report_page,
+    check_recent_scripts_for_title,
     reset_all_channels,
     REFERENCE_DB_ID, 
     SCRIPT_DB_ID
 )
-from youtube_utils import process_channel_url, get_video_transcript, parse_upload_date
+from youtube_api_utils import get_channel_id_from_url, find_latest_video_for_channel, get_video_details
+from youtube_transcript_api import YouTubeTranscriptApi
 from gemini_analyzer import analyze_script_with_gemini
-
-logger = logging.getLogger(__name__)
 
 # 글로벌 스케줄러 인스턴스
 scheduler = None
@@ -37,7 +36,7 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         
         # 활성화되지 않은 항목은 건너뛰기
         if not is_active:
-            logger.info("비활성화된 채널입니다. 스킵합니다.")
+            print("비활성화된 채널입니다. 스킵합니다.")
             return False
         
         # 제목(키워드) 가져오기
@@ -71,61 +70,87 @@ async def process_channel(page: Dict[str, Any]) -> bool:
             investment_style = [item["name"] for item in style_property["multi_select"]]
         
         if not channel_url or not keyword:
-            logger.warning(f"채널 URL 또는 키워드가 없습니다. 스킵합니다.")
+            print(f"채널 URL 또는 키워드가 없습니다. 스킵합니다.")
             return False
         
         # 유튜브 채널 URL이 아니면 스킵
-        if not "youtube.com/@" in channel_url:
-            logger.warning(f"유효한 YouTube 채널 URL이 아닙니다: {channel_url}")
+        if "youtube.com/" not in channel_url:
+            print(f"유효한 YouTube 채널 URL이 아닙니다: {channel_url}")
             return False
         
-        logger.info(f"Processing channel: {channel_url} with keyword: {keyword}")
+        print(f"Processing channel: {channel_url} with keyword: {keyword}")
         
-        # 채널에서 키워드가 포함된 최신 영상 찾기
-        latest_video = await process_channel_url(channel_url, keyword)
+        # 채널 ID 가져오기
+        channel_id = await get_channel_id_from_url(channel_url)
+        if not channel_id:
+            print(f"채널 ID를 가져올 수 없습니다: {channel_url}")
+            return False
+            
+        # 채널에서 키워드가 포함된 최신 영상 찾기 (API 사용)
+        latest_video = await find_latest_video_for_channel(channel_id, keyword, max_results=50)
         
         if not latest_video:
-            logger.warning(f"채널에서 키워드가 포함된 영상을 찾을 수 없습니다: {channel_url}")
+            print(f"채널에서 키워드가 포함된 적합한 영상을 찾을 수 없습니다: {channel_url}")
             return False
 
         # 라이브 예정(Upcoming) 또는 라이브 중(Live) 영상인 경우 처리하지 않고 활성화 상태 유지
         if latest_video.get("is_upcoming", False) or latest_video.get("is_live", False):
             status = "라이브 예정" if latest_video.get("is_upcoming", False) else "라이브 중"
-            logger.info(f"{status} 영상입니다: {latest_video['title']}. 활성화 상태 유지하고 다음에 다시 확인합니다.")
+            print(f"{status} 영상입니다: {latest_video['title']}. 활성화 상태 유지하고 다음에 다시 확인합니다.")
             return False
         
-        # 이미 스크립트가 있는지 확인
+        # 이미 스크립트가 있는지 영상 URL로 확인
         if await check_script_exists(latest_video["url"]):
-            logger.info(f"이미 스크립트가 존재합니다: {latest_video['title']}")
+            print(f"이미 스크립트가 존재합니다: {latest_video['title']}")
             
             # 스크립트가 이미 존재하면 활성화 상태를 비활성화로 변경
             await update_notion_page(page_id, {
                 "활성화": {"checkbox": False}
             })
-            logger.info(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
+            print(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
+            
+            return True
+        
+        # 최근 5일 이내의 스크립트 중 동일한 프로그램(keyword)이 있는지 확인
+        five_days_ago = datetime.now() - timedelta(days=5)
+        if await check_recent_scripts_for_title(keyword, latest_video["url"], five_days_ago.isoformat()):
+            print(f"최근 5일 이내에 동일한 프로그램의 동일한 영상이 이미 처리되었습니다: {latest_video['title']}")
+            
+            # 스크립트가 이미 존재하면 활성화 상태를 비활성화로 변경
+            await update_notion_page(page_id, {
+                "활성화": {"checkbox": False}
+            })
+            print(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
             
             return True
         
         # 스크립트 가져오기
-        script = await get_video_transcript(latest_video["video_id"])
+        try:
+            # 한국어 자막 시도
+            transcript_list = YouTubeTranscriptApi.get_transcript(latest_video["video_id"], languages=["ko"])
+            script = " ".join([entry["text"] for entry in transcript_list])
+        except Exception as e:
+            try:
+                # 자동 언어 감지 시도
+                transcript_list = YouTubeTranscriptApi.get_transcript(latest_video["video_id"])
+                script = " ".join([entry["text"] for entry in transcript_list])
+            except Exception as e2:
+                print(f"자막을 가져올 수 없습니다: {str(e2)}")
+                return False
         
-        # 스크립트가 없거나 에러 메시지를 반환한 경우
-        if not script or script.startswith("스크립트를 가져올 수 없습니다"):
-            logger.warning(f"스크립트를 가져올 수 없습니다: {latest_video['title']}")
-            logger.info(f"자막이 비활성화되었거나 추출할 수 없는 영상입니다. 채널 '{channel_name}'을 활성화 상태로 유지합니다.")
+        if not script or len(script.strip()) < 100:
+            print(f"스크립트가 너무 짧거나 비어 있습니다: {latest_video['title']}")
             return False
         
-        # 스크립트가 있는 경우 페이지 생성
         # 영상 날짜 파싱 - 정확한 업로드 날짜로 변환
-        upload_date_datetime = parse_upload_date(latest_video.get("upload_date", ""))
-        upload_date_iso = upload_date_datetime.isoformat()
+        upload_date_datetime = datetime.fromisoformat(latest_video["upload_date"].replace("Z", "+00:00"))
         
         # 영상 날짜 - UTC로 변환
-        utc_upload_date = upload_date_datetime - timedelta(hours=9)
+        utc_upload_date = upload_date_datetime
 
         # 스크립트 DB에 새 페이지 생성 (속성 설정)
         properties = {
-            # 제목은 참고용 DB의 키워드만 사용
+            # 제목은 참고용 DB의 키워드 사용 (중요: 프로그램 제목으로 사용)
             "제목": {
                 "title": [
                     {
@@ -172,55 +197,55 @@ async def process_channel(page: Dict[str, Any]) -> bool:
         }
         
         # 디버깅 정보 로깅
-        logger.info(f"Creating page for video: {latest_video['title']}")
-        logger.info(f"Keyword: {keyword}, Channel: {channel_name}")
-        logger.info(f"Upload date: {upload_date_datetime.strftime('%Y-%m-%d')}")
+        print(f"Creating page for video: {latest_video['title']}")
+        print(f"Keyword: {keyword}, Channel: {channel_name}")
+        print(f"Upload date: {upload_date_datetime.strftime('%Y-%m-%d')}")
         
         try:
             # Gemini로 스크립트 분석 - 스크립트는 분석에만 사용하고 결과에는 포함하지 않음
-            logger.info(f"Gemini API로 스크립트 분석 시작: {latest_video['title']}")
+            print(f"Gemini API로 스크립트 분석 시작: {latest_video['title']}")
             analysis = await analyze_script_with_gemini(script, latest_video['title'], channel_name)
             
             # 분석 결과만 사용 (원본 스크립트 제외)
             combined_content = analysis
-            logger.info("AI 분석 보고서가 성공적으로 생성되었습니다.")
+            print("AI 분석 보고서가 성공적으로 생성되었습니다.")
         except Exception as e:
-            logger.error(f"AI 분석 중 오류 발생: {str(e)}")
+            print(f"AI 분석 중 오류 발생: {str(e)}")
             # 분석 실패 시 간단한 오류 메시지 저장 (스크립트 포함하지 않음)
             combined_content = f"# AI 분석 보고서\n\n## 분석 오류\n\n분석 과정에서 오류가 발생했습니다: {str(e)}"
-            logger.warning("AI 분석에 실패했습니다. 오류 메시지를 저장합니다.")
+            print("AI 분석에 실패했습니다. 오류 메시지를 저장합니다.")
         
         # 수정된 내용으로 페이지 생성
         script_page = await create_script_report_page(SCRIPT_DB_ID, properties, combined_content)
         
         if script_page:
-            logger.info(f"스크립트+보고서 페이지 생성 완료: {keyword}")
+            print(f"스크립트+보고서 페이지 생성 완료: {latest_video['title']}")
             
             # 스크립트 생성 성공 시 채널 비활성화
             await update_notion_page(page_id, {
                 "활성화": {"checkbox": False}
             })
-            logger.info(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
+            print(f"채널 {channel_name}의 활성화 상태를 비활성화로 변경했습니다.")
             
             return True
         else:
-            logger.error(f"스크립트+보고서 페이지 생성 실패: {keyword}")
+            print(f"스크립트+보고서 페이지 생성 실패: {latest_video['title']}")
             # 페이지 생성에 실패한 경우 활성화 상태 유지
-            logger.info(f"스크립트 생성 실패로 채널 '{channel_name}'을 활성화 상태로 유지합니다.")
+            print(f"스크립트 생성 실패로 채널 '{channel_name}'을 활성화 상태로 유지합니다.")
             return False
         
     except Exception as e:
-        logger.error(f"채널 처리 중 오류: {str(e)}")
+        print(f"채널 처리 중 오류: {str(e)}")
         return False
 
 async def process_channels_by_setting() -> None:
     """모든 활성화된 채널을 처리합니다."""
-    logger.info("채널 처리 시작")
+    print("채널 처리 시작")
     
     try:
         # 참고용 DB의 모든 채널 가져오기
         reference_pages = await query_notion_database(REFERENCE_DB_ID)
-        logger.info(f"참고용 DB에서 {len(reference_pages)}개의 채널을 가져왔습니다.")
+        print(f"참고용 DB에서 {len(reference_pages)}개의 채널을 가져왔습니다.")
         
         # 활성화된 채널만 선택
         active_channels = []
@@ -236,10 +261,10 @@ async def process_channels_by_setting() -> None:
             if is_active:
                 active_channels.append(page)
         
-        logger.info(f"처리할 활성화된 채널 {len(active_channels)}개를 찾았습니다.")
+        print(f"처리할 활성화된 채널 {len(active_channels)}개를 찾았습니다.")
         
         if not active_channels:
-            logger.info("처리할 활성화된 채널이 없습니다.")
+            print("처리할 활성화된 채널이 없습니다.")
             return
         
         # 채널 처리 - API 제한 고려하여 순차적으로 처리
@@ -252,41 +277,41 @@ async def process_channels_by_setting() -> None:
                 if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
                     channel_name = properties["채널명"]["select"]["name"]
                     
-                logger.info(f"채널 처리 시작 ({index+1}/{len(active_channels)}): {channel_name}")
+                print(f"채널 처리 시작 ({index+1}/{len(active_channels)}): {channel_name}")
                 success = await process_channel(channel_page)
                 
                 if success:
                     success_count += 1
-                    logger.info(f"채널 처리 성공: {channel_name}")
+                    print(f"채널 처리 성공: {channel_name}")
                 else:
-                    logger.warning(f"채널 처리 실패: {channel_name}")
+                    print(f"채널 처리 실패: {channel_name}")
                     
-                # 다음 채널 처리 전 1분 대기 (API 제한 1분당 2개 고려)
+                # 다음 채널 처리 전 대기
                 # 마지막 항목이 아니면 대기
                 if index < len(active_channels) - 1:
-                    logger.info(f"API 제한 준수를 위해 10초초 대기 중...")
-                    await asyncio.sleep(10)  # 1분 대기
+                    print(f"API 제한 준수를 위해 2초 대기 중...")
+                    await asyncio.sleep(2)
                     
             except Exception as e:
-                logger.error(f"채널 처리 중 예외 발생: {str(e)}")
-                # 다음 채널 처리 전 1분 대기
+                print(f"채널 처리 중 예외 발생: {str(e)}")
+                # 다음 채널 처리 전 대기
                 if index < len(active_channels) - 1:
-                    logger.info(f"오류 후 API 제한 준수를 위해 10초초 대기 중...")
-                    await asyncio.sleep(10)  # 1분 대기
+                    print(f"오류 후 API 제한 준수를 위해 2초 대기 중...")
+                    await asyncio.sleep(2)
         
-        logger.info(f"처리 완료: {success_count}/{len(active_channels)} 채널 성공")
+        print(f"처리 완료: {success_count}/{len(active_channels)} 채널 성공")
     except Exception as e:
-        logger.error(f"process_channels_by_setting 실행 중 오류: {str(e)}")
+        print(f"process_channels_by_setting 실행 중 오류: {str(e)}")
 
 async def reset_channels_daily() -> None:
     """매일 새벽 4시에 모든 채널을 활성화 상태로 초기화합니다."""
-    logger.info("모든 채널 활성화 작업 시작")
+    print("모든 채널 활성화 작업 시작")
     success = await reset_all_channels()
     
     if success:
-        logger.info("모든 채널이 성공적으로 활성화되었습니다.")
+        print("모든 채널이 성공적으로 활성화되었습니다.")
     else:
-        logger.error("일부 또는 모든 채널의 활성화에 실패했습니다.")
+        print("일부 또는 모든 채널의 활성화에 실패했습니다.")
 
 def setup_scheduler() -> AsyncIOScheduler:
     """스케줄러를 설정하고 작업을 예약합니다."""
@@ -316,18 +341,18 @@ def setup_scheduler() -> AsyncIOScheduler:
     
     # 스케줄러 시작
     scheduler.start()
-    logger.info("Scheduler has been set up and is running.")
+    print("Scheduler has been set up and is running.")
     
     return scheduler
 
 async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = True) -> Dict[str, Any]:
     """특정 시간 설정에 대한 작업 시뮬레이션"""
-    logger.info(f"시간 설정 {time_setting}에 대한 작업 시뮬레이션")
+    print(f"시간 설정 {time_setting}에 대한 작업 시뮬레이션")
     
     try:
         # 참고용 DB의 모든 채널 조회
         reference_pages = await query_notion_database(REFERENCE_DB_ID)
-        logger.info(f"테스트: {len(reference_pages)}개의 채널을 가져왔습니다.")
+        print(f"테스트: {len(reference_pages)}개의 채널을 가져왔습니다.")
         
         # 활성화된 채널 찾기
         active_channels = []
@@ -357,21 +382,21 @@ async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = Tr
                     "page": page
                 })
         
-        logger.info(f"활성화된 채널 {len(active_channels)}개 찾음")
+        print(f"활성화된 채널 {len(active_channels)}개 찾음")
         
         if not simulate_only and active_channels:
             # 실제 실행 모드
-            logger.info("실제 채널 처리 실행 시작")
+            print("실제 채널 처리 실행 시작")
             for i, channel in enumerate(active_channels):
-                logger.info(f"채널 처리 중 ({i+1}/{len(active_channels)}): {channel['channel_name']}")
+                print(f"채널 처리 중 ({i+1}/{len(active_channels)}): {channel['channel_name']}")
                 await process_channel(channel["page"])
                 
                 # 마지막 항목이 아니면 API 제한을 위해 대기
                 if i < len(active_channels) - 1:
-                    logger.info("API 제한을 위해 10초 대기")
-                    await asyncio.sleep(10)
+                    print("API 제한을 위해 2초 대기")
+                    await asyncio.sleep(2)
             
-            logger.info("모든 채널 처리 완료")
+            print("모든 채널 처리 완료")
         
         return {
             "time_setting": time_setting,
@@ -385,7 +410,7 @@ async def simulate_scheduler_at_time(time_setting: int, simulate_only: bool = Tr
             "simulate_only": simulate_only
         }
     except Exception as e:
-        logger.error(f"시뮬레이션 중 오류 발생: {str(e)}")
+        print(f"시뮬레이션 중 오류 발생: {str(e)}")
         return {
             "time_setting": time_setting,
             "error": str(e),
