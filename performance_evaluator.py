@@ -637,17 +637,24 @@ async def save_performance_record(
         # 투자 비중 텍스트
         weights = "균등 비중"  # 기본값
         
+        # 총 수익률 (백테스팅 결과에서 가져오기)
+        portfolio_return = performance_metrics.get("portfolio_return", 0)
+        
+        # 페이지 타이틀 형식 변경 - 총수익률(종목수)
+        page_title = f"{portfolio_return:.1f}%({len(stock_names)}종목)"
+        
         # 성과 기록 생성
         performance_data = {
-            "title": f"{datetime.now().strftime('%Y-%m-%d')} {len(stock_names)}종목 백테스팅",
+            "title": page_title,
             "agent_page_id": agent_page_id,
             "start_date": datetime.fromisoformat(start_date.replace('Z', '+00:00')) if isinstance(start_date, str) else start_date,
             "end_date": datetime.fromisoformat(end_date.replace('Z', '+00:00')) if isinstance(end_date, str) else end_date,
             "stocks": stock_names,
             "weights": weights,
-            "total_return": performance_metrics.get("portfolio_return", 0),
+            "total_return": portfolio_return,
             "max_drawdown": performance_metrics.get("avg_max_drawdown", 0),
-            "evaluation": performance_metrics.get("evaluation", "부분 성공")
+            "evaluation": performance_metrics.get("evaluation", "부분 성공"),
+            "debug_info": debug_info  # 디버깅 정보 전달
         }
         
         # Notion DB에 저장

@@ -640,7 +640,6 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
             
             logger.info(f"보고서 선택 정보 블록 추가 성공: {page_id}")
             
-        # 이하 코드는 동일하게 유지 (성과 요약, 종목별 성과, 추천 종목, 분석 텍스트 등)
         # 성과 요약 정보 추가
         if "performance_metrics" in debug_info:
             metrics = debug_info["performance_metrics"]
@@ -929,67 +928,14 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
             
             logger.info(f"추천 종목 블록 추가 성공: {page_id}")
         
-        # 원본 분석 텍스트 추가 (단순화된 방식으로)
-        if "recommendations" in debug_info and "analysis_text" in debug_info["recommendations"]:
-            analysis_text = debug_info["recommendations"]["analysis_text"]
-            
-            # 너무 긴 텍스트는 나누어 처리
-            max_length = 1900  # 안전한 길이로 설정
-            text_chunks = [analysis_text[i:i+max_length] for i in range(0, len(analysis_text), max_length)]
-            
-            # 분석 텍스트 헤더 추가
-            analysis_header = {
-                "children": [
-                    {
-                        "object": "block",
-                        "type": "heading_3",
-                        "heading_3": {
-                            "rich_text": [{"type": "text", "text": {"content": "원본 분석 텍스트"}}]
-                        }
-                    }
-                ]
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.patch(
-                    url, 
-                    headers=headers, 
-                    json=analysis_header,
-                    timeout=30.0
-                )
-                response.raise_for_status()
-            
-            # 각 청크별로 단락 추가
-            for chunk in text_chunks:
-                chunk_block = {
-                    "children": [
-                        {
-                            "object": "block",
-                            "type": "paragraph",
-                            "paragraph": {
-                                "rich_text": [{"type": "text", "text": {"content": chunk}}]
-                            }
-                        }
-                    ]
-                }
-                
-                async with httpx.AsyncClient() as client:
-                    response = await client.patch(
-                        url, 
-                        headers=headers, 
-                        json=chunk_block,
-                        timeout=30.0
-                    )
-                    response.raise_for_status()
-            
-            logger.info(f"분석 텍스트 블록 추가 성공: {page_id}")
+        # 원본 분석 텍스트 부분 제거 (중복 방지)
         
         return True
         
     except Exception as e:
         logger.error(f"Notion 페이지 컨텐츠 추가 실패: {str(e)}")
         return False
-    
+
 
 async def create_recommendation_record(agent_page_id: str, recommendations: Dict[str, Any], investment_period: int) -> bool:
     """
@@ -1421,13 +1367,18 @@ async def create_investment_performance(performance_data: Dict[str, Any]) -> Opt
     if isinstance(end_date, datetime):
         end_date = end_date.isoformat()
     
-    # 페이지 속성 설정
+    # 페이지 제목 형식 변경 - 수익률 포함
+    total_return = performance_data.get("total_return", 0)
+    stock_count = len(performance_data.get("stocks", []))
+    page_title = f"{total_return:.1f}%({stock_count}종목)"
+    
+    # 페이지 속성 설정 - 기간을 하나의 속성으로 통합
     properties = {
         "투자 기록": {
             "title": [
                 {
                     "text": {
-                        "content": performance_data.get("title", f"투자 기록 {datetime.now().strftime('%Y-%m-%d')}")
+                        "content": performance_data.get("title", page_title)
                     }
                 }
             ]
@@ -1435,14 +1386,10 @@ async def create_investment_performance(performance_data: Dict[str, Any]) -> Opt
         "에이전트": {
             "relation": agent_relation
         },
-        "시작일": {
+        "기간": {
             "date": {
-                "start": start_date
-            }
-        },
-        "종료일": {
-            "date": {
-                "start": end_date
+                "start": start_date,
+                "end": end_date
             }
         },
         "투자 종목": {
@@ -1490,7 +1437,7 @@ async def create_investment_performance(performance_data: Dict[str, Any]) -> Opt
             response.raise_for_status()
             result = response.json()
             
-            logger.info(f"투자 성과 기록 생성 성공: {performance_data.get('title')}")
+            logger.info(f"투자 성과 기록 생성 성공: {performance_data.get('title', page_title)}")
             
             # 페이지가 성공적으로 생성되면 디버깅 정보 추가
             if result and "id" in result:
