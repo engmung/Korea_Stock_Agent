@@ -476,6 +476,7 @@ async def update_notion_page(page_id: str, properties: Dict[str, Any], max_retri
         logger.error(f"Notion 페이지 업데이트 실패: {str(e)}")
         return False
     
+    
 async def add_content_to_notion_page(page_id: str, content: str, title: str = "추가 정보") -> bool:
     """
     노션 페이지에 텍스트 내용을 추가합니다.
