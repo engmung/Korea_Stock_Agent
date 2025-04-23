@@ -92,36 +92,38 @@ async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
     # 텍스트 정리
     cleaned_text = schedule_text.strip()
     
-    # 줄바꿈이나 쉼표로 항목 분리 (두 가지 방식 모두 지원)
-    # 먼저 줄바꿈으로 분리
-    items = []
-    for line in cleaned_text.split('\n'):
-        line = line.strip()
-        if line:
-            # 각 줄에 쉼표가 있을 경우 추가로 분리
-            line_items = [item.strip() for item in line.split(',')]
-            items.extend([item for item in line_items if item])
+    # 줄바꿈으로 분리
+    lines = [line.strip() for line in cleaned_text.split('\n')]
     
-    # 중복 제거 및 빈 항목 제거
-    items = [item for item in items if item]
+    # 각 줄을 개별 항목으로 처리
+    items = []
+    for line in lines:
+        if not line:
+            continue
+            
+        # 각 줄 내에서 쉼표로 분리된 항목 처리
+        if ',' in line:
+            items.extend([item.strip() for item in line.split(',') if item.strip()])
+        else:
+            items.append(line)
     
     logger.info(f"분석된 예약 항목: {items}")
     
     current_year = datetime.now().year
     
-    for range_item in items:
+    for item in items:
         # 날짜 범위 파싱 (형식: MMDD~MMDD)
-        match = re.match(r'(\d{4})~(\d{4})', range_item)
+        match = re.match(r'(\d{4})~(\d{4})', item)
         
         if match:
             start_mmdd, end_mmdd = match.groups()
             
             # MMDD 형식을 YYYY-MM-DD 형식으로 변환
-            start_mm, start_dd = int(start_mmdd[:2]), int(start_mmdd[2:])
-            end_mm, end_dd = int(end_mmdd[:2]), int(end_mmdd[2:])
-            
-            # 날짜 유효성 검증 및 변환
             try:
+                start_mm, start_dd = int(start_mmdd[:2]), int(start_mmdd[2:])
+                end_mm, end_dd = int(end_mmdd[:2]), int(end_mmdd[2:])
+                
+                # 날짜 유효성 검증 및 변환
                 start_date = f"{current_year}-{start_mm:02d}-{start_dd:02d}"
                 end_date = f"{current_year}-{end_mm:02d}-{end_dd:02d}"
                 
@@ -130,17 +132,17 @@ async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
                     # 종료일이 다음 해로 넘어간 경우
                     end_date = f"{current_year + 1}-{end_mm:02d}-{end_dd:02d}"
                 
-                logger.info(f"백테스팅 일정 추가: {start_date} ~ {end_date} (원본: {range_item})")
+                logger.info(f"백테스팅 일정 추가: {start_date} ~ {end_date} (원본: {item})")
                 
                 date_ranges.append({
                     "start_date": start_date,
                     "end_date": end_date,
-                    "original_text": range_item
+                    "original_text": item
                 })
-            except ValueError:
-                logger.error(f"유효하지 않은 날짜 형식: {range_item}")
+            except ValueError as e:
+                logger.error(f"유효하지 않은 날짜 형식: {item} - {str(e)}")
         else:
-            logger.warning(f"잘못된 형식의 예약 항목 건너뜀: {range_item}")
+            logger.warning(f"잘못된 형식의 예약 항목 건너뜀: {item}")
     
     return date_ranges
 
@@ -251,85 +253,112 @@ async def process_agent_schedules(agent: Dict[str, Any]) -> None:
     
     # 날짜 범위 파싱
     date_ranges = await parse_date_ranges(schedule_text)
+    logger.info(f"파싱된 백테스팅 예약: {len(date_ranges)}개")
     
     # 현재 날짜
     today = datetime.now().strftime("%Y-%m-%d")
     
-    # 처리할 예약 개수 확인
+    # 처리할 예약 개수 확인 (오늘 이전이거나 같은 날짜 범위)
     pending_backtests = [dr for dr in date_ranges if dr["end_date"] <= today]
+    
     if pending_backtests:
         logger.info(f"에이전트 '{agent_name}'의 처리 예정 백테스팅: {len(pending_backtests)}개")
+        for i, bt in enumerate(pending_backtests):
+            logger.info(f"  {i+1}. {bt['start_date']} ~ {bt['end_date']} (원본: {bt['original_text']})")
     
-    # 처리해야 할 예약이 있는지 플래그
-    processed_backtests = False
+    # 처리 여부 플래그
+    processed_any = False
     
-    for date_range in date_ranges:
+    # 각 백테스팅 예약 처리
+    for date_range in pending_backtests:
         start_date = date_range["start_date"]
         end_date = date_range["end_date"]
         original_text = date_range["original_text"]
         
-        # 종료일이 오늘이거나 지난 경우만 백테스팅 실행
-        if end_date <= today:
-            logger.info(f"에이전트 '{agent_name}'의 백테스팅 실행: {start_date} ~ {end_date} (원본: {original_text})")
+        logger.info(f"에이전트 '{agent_name}'의 백테스팅 실행: {start_date} ~ {end_date} (원본: {original_text})")
+        
+        try:
+            # 백테스팅 실행
+            result = await backtest_recommendation(
+                page_id=page_id, 
+                start_date=start_date,
+                end_date=end_date,
+                investment_amount=1000000  # 기본 투자금액
+            )
             
-            try:
-                # 백테스팅 실행
-                result = await backtest_recommendation(
-                    page_id=page_id, 
-                    start_date=start_date,
-                    end_date=end_date,
-                    investment_amount=1000000  # 기본 투자금액
-                )
-                
-                if result.get("status") == "success":
-                    # 성공적으로 백테스팅이 완료되면 처리 플래그 설정
-                    processed_backtests = True
-                    logger.info(f"백테스팅 완료: {original_text}")
-                else:
-                    logger.error(f"백테스팅 실패: {result.get('message')}")
-            except Exception as e:
-                logger.error(f"백테스팅 실행 중 오류: {str(e)}")
+            if result.get("status") == "success":
+                processed_any = True
+                logger.info(f"백테스팅 완료: {original_text}")
+            else:
+                logger.error(f"백테스팅 실패: {result.get('message')}")
+        except Exception as e:
+            logger.error(f"백테스팅 실행 중 오류: {str(e)}")
     
-    # 모든 백테스팅 예약 처리 완료 후 예약 필드 비우기
-    if processed_backtests:
+    # 하나라도 처리되었으면 예약 필드 비우기
+    if processed_any:
         await clear_schedule_text(page_id)
         logger.info(f"에이전트 '{agent_name}'의 모든 예약 처리 완료, 예약 필드 비움")
+    else:
+        logger.info(f"에이전트 '{agent_name}'의 처리할 백테스팅 예약이 없거나 모두 실패했습니다.")
 
 async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
     """
     예약 문자열에서 날짜 범위를 파싱합니다.
-    형식: '0522~0526, 0601~0605' 또는 '0522~0526'
+    줄바꿈 또는 쉼표로 구분된 형식 지원:
+    
+    형식 1 (줄바꿈):
+    0522~0526
+    0601~0605
+    
+    형식 2 (쉼표):
+    0522~0526, 0601~0605
     
     Returns:
         List[Dict[str, str]]: 시작일과 종료일 딕셔너리 리스트
     """
     date_ranges = []
     
-    # 쉼표로 구분된 항목들을 분리
+    # 입력이 비어있으면 빈 리스트 반환
     if not schedule_text:
         return []
         
-    # 대괄호 제거 불필요 (사용자가 대괄호를 사용하지 않음)
+    # 텍스트 정리
     cleaned_text = schedule_text.strip()
     
-    # 쉼표로 분리
-    range_items = [item.strip() for item in cleaned_text.split(',')]
+    # 먼저 줄바꿈으로 분리
+    lines = [line.strip() for line in cleaned_text.split('\n')]
+    
+    # 각 줄마다 작업
+    items = []
+    for line in lines:
+        if not line:
+            continue
+            
+        # 각 줄 내에서 쉼표로 분리된 항목 처리
+        if ',' in line:
+            comma_items = [item.strip() for item in line.split(',') if item.strip()]
+            items.extend(comma_items)
+        else:
+            items.append(line)
+    
+    # 디버깅용 로그 추가
+    logger.info(f"분석된 예약 항목: {items}")
     
     current_year = datetime.now().year
     
-    for range_item in range_items:
+    for item in items:
         # 날짜 범위 파싱 (형식: MMDD~MMDD)
-        match = re.match(r'(\d{4})~(\d{4})', range_item)
+        match = re.match(r'(\d{4})~(\d{4})', item)
         
         if match:
             start_mmdd, end_mmdd = match.groups()
             
             # MMDD 형식을 YYYY-MM-DD 형식으로 변환
-            start_mm, start_dd = int(start_mmdd[:2]), int(start_mmdd[2:])
-            end_mm, end_dd = int(end_mmdd[:2]), int(end_mmdd[2:])
-            
-            # 날짜 유효성 검증 및 변환
             try:
+                start_mm, start_dd = int(start_mmdd[:2]), int(start_mmdd[2:])
+                end_mm, end_dd = int(end_mmdd[:2]), int(end_mmdd[2:])
+                
+                # 날짜 유효성 검증 및 변환
                 start_date = f"{current_year}-{start_mm:02d}-{start_dd:02d}"
                 end_date = f"{current_year}-{end_mm:02d}-{end_dd:02d}"
                 
@@ -338,13 +367,17 @@ async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
                     # 종료일이 다음 해로 넘어간 경우
                     end_date = f"{current_year + 1}-{end_mm:02d}-{end_dd:02d}"
                 
+                logger.info(f"백테스팅 일정 추가: {start_date} ~ {end_date} (원본: {item})")
+                
                 date_ranges.append({
                     "start_date": start_date,
                     "end_date": end_date,
-                    "original_text": range_item
+                    "original_text": item
                 })
-            except ValueError:
-                logger.error(f"유효하지 않은 날짜 형식: {range_item}")
+            except ValueError as e:
+                logger.error(f"유효하지 않은 날짜 형식: {item} - {str(e)}")
+        else:
+            logger.warning(f"잘못된 형식의 예약 항목 건너뜀: {item}")
     
     return date_ranges
 

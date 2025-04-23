@@ -653,9 +653,10 @@ async def save_performance_record(
             "weights": weights,
             "total_return": portfolio_return,
             "max_drawdown": performance_metrics.get("avg_max_drawdown", 0),
-            "evaluation": performance_metrics.get("evaluation", "부분 성공"),
-            "debug_info": debug_info  # 디버깅 정보 전달
+            "evaluation": performance_metrics.get("evaluation", "부분 성공")
         }
+        
+        # 디버깅 정보는 별도로 관리 (create_investment_performance로 전달하지 않음)
         
         # Notion DB에 저장
         result = await create_investment_performance(performance_data)

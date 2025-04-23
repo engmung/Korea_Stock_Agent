@@ -475,6 +475,74 @@ async def update_notion_page(page_id: str, properties: Dict[str, Any], max_retri
     except Exception as e:
         logger.error(f"Notion 페이지 업데이트 실패: {str(e)}")
         return False
+    
+async def add_content_to_notion_page(page_id: str, content: str, title: str = "추가 정보") -> bool:
+    """
+    노션 페이지에 텍스트 내용을 추가합니다.
+    """
+    url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        # 내용이 너무 길면 분할
+        max_length = 2000  # API 제한을 고려한 안전한 길이
+        content_chunks = [content[i:i+max_length] for i in range(0, len(content), max_length)]
+        
+        # 헤더 블록 추가
+        header_block = {
+            "children": [
+                {
+                    "object": "block",
+                    "type": "heading_3",
+                    "heading_3": {
+                        "rich_text": [{"type": "text", "text": {"content": title}}]
+                    }
+                }
+            ]
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                url, 
+                headers=headers, 
+                json=header_block,
+                timeout=30.0
+            )
+            response.raise_for_status()
+        
+        # 내용 청크 추가
+        for chunk in content_chunks:
+            content_block = {
+                "children": [
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{"type": "text", "text": {"content": chunk}}]
+                        }
+                    }
+                ]
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    url, 
+                    headers=headers, 
+                    json=content_block,
+                    timeout=30.0
+                )
+                response.raise_for_status()
+        
+        logger.info(f"페이지 {page_id}에 콘텐츠 추가 성공: {title}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"페이지 {page_id}에 콘텐츠 추가 실패: {str(e)}")
+        return False
 
 async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[str, Any], title: str = "백테스팅 결과") -> bool:
     """
@@ -928,14 +996,66 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
             
             logger.info(f"추천 종목 블록 추가 성공: {page_id}")
         
-        # 원본 분석 텍스트 부분 제거 (중복 방지)
+        # 원본 분석 텍스트 추가 (다시 추가)
+        if "recommendations" in debug_info and "analysis_text" in debug_info["recommendations"]:
+            analysis_text = debug_info["recommendations"]["analysis_text"]
+            
+            # 너무 긴 텍스트는 나누어 처리
+            max_length = 1900  # 안전한 길이로 설정
+            text_chunks = [analysis_text[i:i+max_length] for i in range(0, len(analysis_text), max_length)]
+            
+            # 분석 텍스트 헤더 추가
+            analysis_header = {
+                "children": [
+                    {
+                        "object": "block",
+                        "type": "heading_3",
+                        "heading_3": {
+                            "rich_text": [{"type": "text", "text": {"content": "원본 분석 텍스트"}}]
+                        }
+                    }
+                ]
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    url, 
+                    headers=headers, 
+                    json=analysis_header,
+                    timeout=30.0
+                )
+                response.raise_for_status()
+            
+            # 각 청크별로 단락 추가
+            for chunk in text_chunks:
+                chunk_block = {
+                    "children": [
+                        {
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [{"type": "text", "text": {"content": chunk}}]
+                            }
+                        }
+                    ]
+                }
+                
+                async with httpx.AsyncClient() as client:
+                    response = await client.patch(
+                        url, 
+                        headers=headers, 
+                        json=chunk_block,
+                        timeout=30.0
+                    )
+                    response.raise_for_status()
+            
+            logger.info(f"분석 텍스트 블록 추가 성공: {page_id}")
         
         return True
         
     except Exception as e:
         logger.error(f"Notion 페이지 컨텐츠 추가 실패: {str(e)}")
         return False
-
 
 async def create_recommendation_record(agent_page_id: str, recommendations: Dict[str, Any], investment_period: int) -> bool:
     """
