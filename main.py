@@ -1,23 +1,31 @@
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+import logging
+from datetime import datetime
 
 # 환경 변수 로드
 load_dotenv()
 
 # 모듈화된 컴포넌트 임포트
-from scheduler import setup_scheduler, simulate_scheduler_at_time, process_channels_by_setting
-from notion_utils import (
-    query_notion_database,
-    REFERENCE_DB_ID, 
-    SCRIPT_DB_ID
-)
-from historical_data_processor import process_all_channels_historical_data
+from notion_utils import find_agent_by_name, create_recommendation_record
+from investment_agent import InvestmentAgent, create_investment_agent
+from report_analyzer import analyze_reports, find_relevant_reports
+from stock_recommender import recommend_stocks
+from performance_evaluator import backtest_recommendation
+from backtest_scheduler import start_scheduler
 
-app = FastAPI(title="투자 의사결정 지원 시스템")
+# 로깅 설정 - 간결한 포맷으로 변경
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="투자 에이전트 API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,234 +35,334 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class NotionSyncRequest(BaseModel):
-    pass  # 빈 요청 본문, 단순히 동기화 작업 트리거용
+# API 모델 정의
+class AgentDefinition(BaseModel):
+    agent_name: Optional[str] = None
+    investment_philosophy: str
+    target_channels: List[str] = []
+    target_keywords: List[str] = []
+    recommendation_strength: List[str] = ["매수", "적극매수"]
+    investment_horizon: List[str] = ["단기", "중기"]
+    backtest_schedule: Optional[str] = None
 
-class NotionSyncResponse(BaseModel):
-    status: str
-    message: str
+class RecommendationByNameRequest(BaseModel):
+    agent_name: str
+    max_stocks: int = Field(5, ge=1, le=10)
+    investment_period: int = Field(7, description="투자 기간(일)", ge=1, le=30)
 
-class SimulateRequest(BaseModel):
-    time_setting: int = Field(
-        9, 
-        description="시뮬레이션할 시간 설정 (0-23 사이의 정수)", 
-        ge=0, 
-        le=23
-    )
-    simulate_only: bool = Field(
-        True, 
-        description="실제 채널 처리 실행 여부 (True: 시뮬레이션만, False: 실제 실행)"
-    )
-
-class HistoricalDataRequest(BaseModel):
-    videos_per_channel: int = 500
-    process_limit_per_channel: int = 20
-    target_programs: Optional[List[str]] = None
-    concurrent_channels: int = 3
-
-@app.get("/")
-async def root():
-    return {"message": "투자 의사결정 지원 시스템 API"}
-
-@app.post("/sync-channels", response_model=NotionSyncResponse)
-async def sync_channels(background_tasks: BackgroundTasks):
-    """모든 채널에 대해 콘텐츠를 추출하고 분석합니다."""
-    try:
-        # 백그라운드 작업으로 실행
-        background_tasks.add_task(process_channels_by_setting)
-        return {"status": "processing", "message": "동기화 작업이 시작되었습니다. 완료까지 시간이 걸릴 수 있습니다."}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"채널 동기화 중 오류가 발생했습니다: {str(e)}")
-
-@app.post("/run-now")
-async def run_now():
-    """지금 바로 채널 처리 작업을 실행합니다."""
-    try:
-        await process_channels_by_setting()
-        return {"status": "success", "message": "채널 처리 작업이 실행되었습니다."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"즉시 실행 중 오류가 발생했습니다: {str(e)}")
-
-@app.post("/simulate", description="특정 시간 설정에 대한 작업 시뮬레이션. 시간을 지정하여 해당 시간에 어떤 채널이 처리될지 확인하거나 실제로 처리합니다.")
-async def simulate(request: SimulateRequest):
-    """특정 시간 설정에 대한 작업 시뮬레이션"""
-    try:
-        time_setting = request.time_setting
-        simulate_only = request.simulate_only
-        
-        result = await simulate_scheduler_at_time(time_setting, simulate_only)
-        return {
-            "status": "success", 
-            "message": f"시간 {time_setting}시 설정에 대한 {'시뮬레이션' if simulate_only else '실행'} 완료",
-            "result": result
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"시뮬레이션 중 오류가 발생했습니다: {str(e)}")
-
-@app.get("/reference-db")
-async def get_reference_db():
-    """참고용 DB의 모든 채널 정보 조회"""
-    try:
-        pages = await query_notion_database(REFERENCE_DB_ID)
-        
-        channels = []
-        for page in pages:
-            properties = page.get("properties", {})
-            
-            # 필요한 속성 추출
-            channel_info = {
-                "id": page.get("id"),
-                "title": "",
-                "url": "",
-                "channel_name": "",
-                "active": False,
-                "time": 9,
-                "content_type": "",
-                "investment_style": []
-            }
-            
-            # 제목
-            if "제목" in properties and "title" in properties["제목"] and properties["제목"]["title"]:
-                channel_info["title"] = properties["제목"]["title"][0]["plain_text"]
-            
-            # URL
-            if "URL" in properties and "url" in properties["URL"]:
-                channel_info["url"] = properties["URL"]["url"]
-            
-            # 채널명
-            if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
-                channel_info["channel_name"] = properties["채널명"]["select"]["name"]
-            
-            # 활성화
-            if "활성화" in properties and "checkbox" in properties["활성화"]:
-                channel_info["active"] = properties["활성화"]["checkbox"]
-            
-            # 시간
-            if "시간" in properties and "number" in properties["시간"] and properties["시간"]["number"] is not None:
-                channel_info["time"] = properties["시간"]["number"]
-            
-            # 콘텐츠 유형
-            if "콘텐츠 유형" in properties and "select" in properties["콘텐츠 유형"] and properties["콘텐츠 유형"]["select"]:
-                channel_info["content_type"] = properties["콘텐츠 유형"]["select"]["name"]
-            
-            # 투자 스타일
-            if "투자 스타일" in properties and "multi_select" in properties["투자 스타일"]:
-                channel_info["investment_style"] = [item["name"] for item in properties["투자 스타일"]["multi_select"]]
-            
-            channels.append(channel_info)
-        
-        return {"status": "success", "channels": channels, "total": len(channels)}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"참고용 DB 조회 중 오류가 발생했습니다: {str(e)}")
-
-@app.get("/script-db")
-async def get_script_db():
-    """스크립트 DB의 모든 분석 보고서 정보 조회"""
-    try:
-        pages = await query_notion_database(SCRIPT_DB_ID)
-        
-        scripts = []
-        for page in pages:
-            properties = page.get("properties", {})
-            
-            # 필요한 속성 추출
-            script_info = {
-                "id": page.get("id"),
-                "title": "",
-                "url": "",
-                "video_date": "",
-                "channel_name": "",
-                "video_length": "",
-                "citation_count": 0,
-                "presenters": []
-            }
-            
-            # 제목
-            if "제목" in properties and "title" in properties["제목"] and properties["제목"]["title"]:
-                script_info["title"] = properties["제목"]["title"][0]["plain_text"]
-            
-            # URL
-            if "URL" in properties and "url" in properties["URL"]:
-                script_info["url"] = properties["URL"]["url"]
-            
-            # 영상 날짜
-            if "영상 날짜" in properties and "date" in properties["영상 날짜"] and properties["영상 날짜"]["date"]:
-                script_info["video_date"] = properties["영상 날짜"]["date"]["start"]
-            
-            # 채널명
-            if "채널명" in properties and "select" in properties["채널명"] and properties["채널명"]["select"]:
-                script_info["channel_name"] = properties["채널명"]["select"]["name"]
-            
-            # 영상 길이
-            if "영상 길이" in properties and "rich_text" in properties["영상 길이"] and properties["영상 길이"]["rich_text"]:
-                script_info["video_length"] = properties["영상 길이"]["rich_text"][0]["plain_text"]
-            
-            # 인용 횟수
-            if "인용 횟수" in properties and "number" in properties["인용 횟수"]:
-                script_info["citation_count"] = properties["인용 횟수"]["number"] or 0
-            
-            # 출연자
-            if "출연자" in properties and "multi_select" in properties["출연자"]:
-                script_info["presenters"] = [item["name"] for item in properties["출연자"]["multi_select"]]
-            
-            scripts.append(script_info)
-        
-        # 영상 날짜 기준 내림차순 정렬
-        scripts.sort(key=lambda x: x["video_date"] or "", reverse=True)
-        
-        return {"status": "success", "scripts": scripts, "total": len(scripts)}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"스크립트 DB 조회 중 오류가 발생했습니다: {str(e)}")
-
-@app.post("/process-historical-data")
-async def process_historical_data(background_tasks: BackgroundTasks, request: HistoricalDataRequest):
-    """
-    과거 데이터를 처리하여 분석 보고서를 Notion DB에 저장합니다
-    YouTube Data API를 활용하여 채널의 과거 영상을 검색하고 분석합니다
-    
-    - videos_per_channel: 각 채널에서 가져올 최대 영상 수 (기본값: 500)
-    - process_limit_per_channel: 각 채널에서 실제로 처리할 최대 영상 수 (기본값: 20)
-    - target_programs: 특정 프로그램 제목 목록 (지정 시 해당 프로그램만 처리)
-    - concurrent_channels: 동시에 처리할 채널 수 (기본값: 3)
-    """
-    try:
-        # 병렬 처리 설정 검증
-        concurrent_channels = max(1, min(request.concurrent_channels, 5))  # 1-5 사이로 제한
-        
-        # 백그라운드 작업으로 실행
-        def run_historical_processor():
-            import asyncio
-            asyncio.run(process_all_channels_historical_data(
-                videos_per_channel=request.videos_per_channel,
-                process_limit_per_channel=request.process_limit_per_channel,
-                target_programs=request.target_programs,
-                concurrent_channels=concurrent_channels
-            ))
-        
-        background_tasks.add_task(run_historical_processor)
-        
-        return {
-            "status": "processing", 
-            "message": "과거 데이터 처리가 백그라운드에서 시작되었습니다. 완료까지 시간이 걸릴 수 있습니다.",
-            "config": {
-                "videos_per_channel": request.videos_per_channel,
-                "process_limit_per_channel": request.process_limit_per_channel,
-                "target_programs": request.target_programs,
-                "concurrent_channels": concurrent_channels
-            }
-        }
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"과거 데이터 처리 시작 중 오류가 발생했습니다: {str(e)}")
+class BacktestByNameRequest(BaseModel):
+    agent_name: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    investment_amount: float = 1000000
 
 @app.on_event("startup")
 async def startup_event():
-    """애플리케이션 시작 시 스케줄러 설정"""
-    setup_scheduler()
+    """애플리케이션 시작 시 실행되는 이벤트 핸들러"""
+    logger.info("투자 에이전트 API 시작")
+    
+    # 백테스팅 스케줄러 시작
+    start_scheduler()
+    logger.info("백테스팅 스케줄러 시작됨")
+
+@app.get("/")
+async def root():
+    return {"message": "투자 에이전트 API"}
+
+@app.post("/agents")
+async def create_agent(agent_def: AgentDefinition):
+    """새 투자 에이전트를 생성합니다."""
+    try:
+        agent_data = agent_def.dict()
+        
+        # 백테스팅 예약 정보가 있으면 추가
+        if agent_def.backtest_schedule:
+            agent_data["backtest_schedule"] = agent_def.backtest_schedule
+        
+        # 에이전트 생성
+        result = await create_investment_agent(agent_data)
+        
+        if result and result.get("id"):
+            # 페이지 ID 추출
+            page_id = result.get("id")
+            
+            # 에이전트 기본 정보 반환
+            return {
+                "status": "success", 
+                "agent": {
+                    "id": page_id,
+                    "agent_name": agent_def.agent_name or f"에이전트_{datetime.now().strftime('%Y%m%d%H%M%S')}", 
+                    "investment_philosophy": agent_def.investment_philosophy,
+                    "backtest_schedule": agent_def.backtest_schedule
+                }
+            }
+        else:
+            raise HTTPException(status_code=400, detail="에이전트 생성 실패")
+    
+    except Exception as e:
+        logger.error(f"에이전트 생성 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"에이전트 생성 중 오류: {str(e)}")
+    
+@app.post("/backtest/scheduler/test")
+async def test_backtest_scheduler():
+    """
+    백테스팅 예약 스케줄러를 수동으로 실행합니다.
+    이 API는 테스트 용도로, 실제로는 매 시간 30분에 자동으로 실행됩니다.
+    """
+    try:
+        from backtest_scheduler import check_backtest_schedules
+        
+        # 백테스팅 스케줄러 수동 실행
+        await check_backtest_schedules()
+        
+        return {
+            "status": "success",
+            "message": "백테스팅 예약 스케줄러가 성공적으로 실행되었습니다.",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"백테스팅 스케줄러 테스트 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"백테스팅 스케줄러 테스트 중 오류: {str(e)}")
+
+@app.post("/backtest/scheduler/force-run")
+async def force_run_scheduler():
+    """
+    백테스팅 예약 스케줄러를 강제로 즉시 실행합니다.
+    """
+    try:
+        from backtest_scheduler import run_async_in_thread, check_backtest_schedules
+        
+        logger.info("API를 통한 백테스팅 스케줄러 강제 실행 시작")
+        # API 컨텍스트에서는 직접 비동기 함수를 호출할 수 있음
+        await check_backtest_schedules()
+        logger.info("API를 통한 백테스팅 스케줄러 강제 실행 완료")
+        
+        return {
+            "status": "success",
+            "message": "백테스팅 예약 스케줄러가 강제로 실행되었습니다.",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"백테스팅 스케줄러 강제 실행 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"백테스팅 스케줄러 강제 실행 중 오류: {str(e)}")
+
+@app.get("/backtest/scheduler/status")
+async def get_scheduler_status():
+    """
+    백테스팅 예약 스케줄러의 상태를 확인합니다.
+    """
+    try:
+        from backtest_scheduler import scheduler
+        
+        jobs = scheduler.get_jobs()
+        next_runs = []
+        
+        for job in jobs:
+            if job.id == 'backtest_scheduler':
+                next_runs.append({
+                    "id": job.id,
+                    "next_run": job.next_run_time.isoformat() if job.next_run_time else None
+                })
+        
+        return {
+            "status": "success",
+            "scheduler_running": scheduler.running,
+            "next_scheduled_runs": next_runs,
+            "current_time": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"스케줄러 상태 확인 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"스케줄러 상태 확인 중 오류: {str(e)}")
+
+@app.get("/agents")
+async def list_agents():
+    """모든 투자 에이전트 목록을 가져옵니다."""
+    try:
+        # Notion DB에서 에이전트 페이지 조회
+        from notion_utils import query_notion_database, NOTION_AGENT_DB_ID
+        agent_pages = await query_notion_database(NOTION_AGENT_DB_ID)
+        
+        agents = []
+        for page in agent_pages:
+            properties = page.get("properties", {})
+            
+            agent_info = {
+                "id": page.get("id"),
+                "agent_name": "",
+                "investment_philosophy": "",
+                "status": "활성",
+                "created_at": ""
+            }
+            
+            # 에이전트명
+            if "에이전트명" in properties and "title" in properties["에이전트명"]:
+                title_obj = properties["에이전트명"]["title"]
+                if title_obj and len(title_obj) > 0:
+                    agent_info["agent_name"] = title_obj[0]["plain_text"]
+            
+            # 투자 철학
+            if "투자 철학" in properties and "rich_text" in properties["투자 철학"]:
+                text_obj = properties["투자 철학"]["rich_text"]
+                if text_obj and len(text_obj) > 0:
+                    agent_info["investment_philosophy"] = text_obj[0]["plain_text"]
+            
+            # 상태
+            if "현재 상태" in properties and "select" in properties["현재 상태"]:
+                status_obj = properties["현재 상태"]["select"]
+                if status_obj:
+                    agent_info["status"] = status_obj["name"]
+                
+            # 생성일
+            if "생성일" in properties and "date" in properties["생성일"]:
+                date_obj = properties["생성일"]["date"]
+                if date_obj and "start" in date_obj:
+                    agent_info["created_at"] = date_obj["start"]
+            
+            agents.append(agent_info)
+        
+        return {"status": "success", "agents": agents, "total": len(agents)}
+        
+    except Exception as e:
+        logger.error(f"에이전트 목록 조회 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"에이전트 목록 조회 중 오류: {str(e)}")
+
+@app.get("/agents/name/{agent_name}")
+async def get_agent_by_name(agent_name: str):
+    """에이전트명으로 투자 에이전트의 정보를 가져옵니다."""
+    try:
+        # 에이전트명으로 페이지 ID 검색
+        page_id = await find_agent_by_name(agent_name)
+        
+        if not page_id:
+            raise HTTPException(status_code=404, detail=f"에이전트명 '{agent_name}'에 해당하는 에이전트를 찾을 수 없습니다.")
+        
+        # 에이전트 로드
+        agent = await InvestmentAgent.load_from_notion(page_id)
+        
+        if agent:
+            return {
+                "status": "success",
+                "agent": {
+                    "id": agent.page_id,
+                    "agent_name": agent.agent_name,
+                    "investment_philosophy": agent.investment_philosophy,
+                    "target_channels": agent.target_channels,
+                    "target_keywords": agent.target_keywords,
+                    "recommendation_strength": agent.recommendation_strength_filter,
+                    "investment_horizon": agent.investment_horizon,
+                    "status": agent.status
+                }
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"에이전트를 찾을 수 없습니다: {page_id}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"에이전트 조회 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"에이전트 조회 중 오류: {str(e)}")
+
+@app.post("/recommendations/name")
+async def get_recommendations_by_name(request: RecommendationByNameRequest):
+    """에이전트명 기반으로 투자 에이전트의 종목 추천을 제공합니다."""
+    try:
+        # 에이전트명으로 페이지 ID 검색
+        page_id = await find_agent_by_name(request.agent_name)
+        
+        if not page_id:
+            raise HTTPException(status_code=404, detail=f"에이전트명 '{request.agent_name}'에 해당하는 에이전트를 찾을 수 없습니다.")
+        
+        # 에이전트 로드
+        agent = await InvestmentAgent.load_from_notion(page_id)
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"에이전트를 찾을 수 없습니다: {page_id}")
+        
+        # 현재 날짜 기준 설정
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # 관련 보고서 검색 - 현재 날짜 이전의 보고서만
+        reports = await find_relevant_reports(
+            agent=agent,
+            backtest_date=current_date,
+            max_reports=10
+        )
+        
+        if not reports:
+            return {
+                "status": "warning",
+                "message": "투자 에이전트의 조건에 맞는 보고서를 찾을 수 없습니다.",
+                "recommendations": []
+            }
+        
+        # LLM을 사용한 보고서 분석 및 종목 추천 (통합)
+        from report_analyzer import analyze_reports_with_llm
+        result = await analyze_reports_with_llm(
+            reports=reports,
+            agent=agent,
+            max_stocks=request.max_stocks,
+            investment_period=request.investment_period
+        )
+        
+        # 추천 기록 저장 (백테스팅 없이)
+        await create_recommendation_record(
+            agent_page_id=page_id,
+            recommendations=result,
+            investment_period=request.investment_period
+        )
+        
+        return {
+            "status": "success",
+            "agent_name": agent.agent_name,
+            "investment_philosophy": agent.investment_philosophy,
+            "analyzed_reports_count": result.get("total_reports", 0),
+            "recommendations": result.get("recommended_stocks", []),
+            "portfolio_logic": result.get("portfolio_logic", ""),
+            "recommendation_date": current_date
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"종목 추천 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"종목 추천 중 오류: {str(e)}")
+
+@app.post("/backtest/name")
+async def run_backtest_by_name(request: BacktestByNameRequest):
+    """에이전트명 기반으로 투자 에이전트의 백테스팅을 실행합니다."""
+    try:
+        # 에이전트명으로 페이지 ID 검색
+        page_id = await find_agent_by_name(request.agent_name)
+        
+        if not page_id:
+            raise HTTPException(status_code=404, detail=f"에이전트명 '{request.agent_name}'에 해당하는 에이전트를 찾을 수 없습니다.")
+        
+        # 에이전트 로드
+        agent = await InvestmentAgent.load_from_notion(page_id)
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"에이전트를 찾을 수 없습니다: {page_id}")
+        
+        # 백테스팅 시작
+        result = await backtest_recommendation(
+            page_id=page_id,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            investment_amount=request.investment_amount
+        )
+        
+        return {
+            "status": "success",
+            "message": "백테스팅이 성공적으로 요청되었습니다. 결과는 자동으로 기록됩니다.",
+            "agent_name": agent.agent_name
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"백테스팅 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"백테스팅 중 오류: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8003, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True)

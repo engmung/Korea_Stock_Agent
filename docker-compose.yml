@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8003:8003"
+      - "8002:8002"
     volumes:
       - .:/app
       - ./.env:/app/.env
@@ -15,5 +15,7 @@ services:
       - TZ=Asia/Seoul
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - NOTION_API_KEY=${NOTION_API_KEY}
-      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - NOTION_AGENT_DB_ID=${NOTION_AGENT_DB_ID}
+      - NOTION_SCRIPT_DB_ID=${NOTION_SCRIPT_DB_ID}
+      - NOTION_PERFORMANCE_DB_ID=${NOTION_PERFORMANCE_DB_ID}
     restart: unless-stopped
