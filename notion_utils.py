@@ -1058,7 +1058,7 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
         logger.error(f"Notion 페이지 컨텐츠 추가 실패: {str(e)}")
         return False
 
-async def create_recommendation_record(agent_page_id: str, recommendations: Dict[str, Any], investment_period: int) -> bool:
+async def create_recommendation_record(agent_page_id: str, recommendations: Dict[str, Any], investment_period: int, title_prefix: str = None) -> bool:
     """
     투자 추천 결과만 Notion DB에 저장합니다 (백테스팅 없이).
     
@@ -1066,6 +1066,7 @@ async def create_recommendation_record(agent_page_id: str, recommendations: Dict
         agent_page_id: 투자 에이전트 페이지 ID
         recommendations: 추천 종목 정보
         investment_period: 투자 기간 (일)
+        title_prefix: 제목 접두사 (기본값: None, ex: "5종목추천")
         
     Returns:
         저장 성공 여부
@@ -1087,9 +1088,19 @@ async def create_recommendation_record(agent_page_id: str, recommendations: Dict
         # 투자 비중 텍스트
         weights = "균등 비중"  # 기본값
         
+        # 제목 설정 (종목추천 형식 또는 기본 형식)
+        if title_prefix:
+            # 타이틀에 공백이 있는지 확인하고 적절하게 처리
+            title = f"{title_prefix} {current_date.strftime('%Y-%m-%d')}"
+        else:
+            num_stocks = len(stock_names) if stock_names else 0
+            title = f"{num_stocks}종목추천 {current_date.strftime('%Y-%m-%d')}"
+        
+        logger.info(f"저장할 추천 기록 제목: {title}")
+        
         # 추천 기록 생성
         recommendation_data = {
-            "title": f"{current_date.strftime('%Y-%m-%d')} {len(stock_names)}종목 추천",
+            "title": title,
             "agent_page_id": agent_page_id,
             "start_date": current_date,
             "end_date": end_date,
@@ -1126,81 +1137,122 @@ async def create_investment_recommendation(recommendation_data: Dict[str, Any]) 
         "Content-Type": "application/json"
     }
     
-    # 추천 종목 - 멀티 셀렉트 객체 생성
-    stocks_multi_select = []
-    for stock in recommendation_data.get("stocks", []):
-        stocks_multi_select.append({
-            "name": stock
-        })
-    
-    # 에이전트 ID 관계 설정
-    agent_relation = []
-    if "agent_page_id" in recommendation_data:
-        agent_relation = [{"id": recommendation_data["agent_page_id"]}]
-    
-    # 날짜 형식 변환
-    start_date = recommendation_data.get("start_date")
-    end_date = recommendation_data.get("end_date")
-    
-    if isinstance(start_date, datetime):
-        start_date = start_date.isoformat()
-    
-    if isinstance(end_date, datetime):
-        end_date = end_date.isoformat()
-    
-    # 페이지 속성 설정 - 성과 DB와 동일한 구조 사용 (필요시 수정 가능)
-    properties = {
-        "투자 기록": {  # 타이틀 필드명은 DB에 맞게 조정 필요
-            "title": [
-                {
-                    "text": {
-                        "content": recommendation_data.get("title", f"추천 기록 {datetime.now().strftime('%Y-%m-%d')}")
+    try:
+        # 추천 종목 - 멀티 셀렉트 객체 생성
+        stocks_multi_select = []
+        for stock in recommendation_data.get("stocks", []):
+            # 종목명이 너무 길면 자르기 (Notion 멀티셀렉트 제한)
+            stock_name = str(stock)
+            if len(stock_name) > 100:
+                stock_name = stock_name[:97] + "..."
+                
+            stocks_multi_select.append({
+                "name": stock_name
+            })
+        
+        # 에이전트 ID 관계 설정
+        agent_relation = []
+        if "agent_page_id" in recommendation_data:
+            agent_relation = [{"id": recommendation_data["agent_page_id"]}]
+        
+        # 날짜 형식 변환 및 검증
+        start_date = recommendation_data.get("start_date")
+        end_date = recommendation_data.get("end_date")
+        
+        # 날짜 객체를 ISO 형식 문자열로 변환
+        if isinstance(start_date, datetime):
+            start_date = start_date.isoformat()
+        
+        if isinstance(end_date, datetime):
+            end_date = end_date.isoformat()
+            
+        # 문자열이 아니면 현재 날짜 사용
+        if not isinstance(start_date, str):
+            start_date = datetime.now().isoformat()
+            
+        if not isinstance(end_date, str):
+            end_date = (datetime.now() + timedelta(days=7)).isoformat()
+            
+        # ISO 형식 확인 (Z 추가)
+        if not start_date.endswith('Z') and 'T' in start_date:
+            start_date = start_date.replace('+00:00', 'Z') if '+00:00' in start_date else f"{start_date}Z"
+            
+        if not end_date.endswith('Z') and 'T' in end_date:
+            end_date = end_date.replace('+00:00', 'Z') if '+00:00' in end_date else f"{end_date}Z"
+        
+        # 타이틀 설정
+        title = recommendation_data.get("title", f"추천 기록 {datetime.now().strftime('%Y-%m-%d')}")
+        
+        # 비중 및 평가 항목
+        weights = recommendation_data.get("weights", "균등 비중")
+        if len(weights) > 2000:  # rich_text 길이 제한
+            weights = weights[:1997] + "..."
+            
+        recommendation_type = recommendation_data.get("recommendation_type", "신규 추천")
+        
+        # 페이지 속성 설정 - 필수 속성만 포함
+        properties = {
+            "투자 기록": {
+                "title": [
+                    {
+                        "text": {
+                            "content": title
+                        }
                     }
-                }
-            ]
-        },
-        "에이전트": {
-            "relation": agent_relation
-        },
-        "시작일": {
-            "date": {
-                "start": start_date
+                ]
             }
-        },
-        "종료일": {
-            "date": {
-                "start": end_date
+        }
+        
+        # 에이전트 관계가 있는 경우만 추가
+        if agent_relation:
+            properties["에이전트"] = {
+                "relation": agent_relation
             }
-        },
-        "투자 종목": {
-            "multi_select": stocks_multi_select
-        },
-        "투자 비중": {
+        
+        # 시작일/종료일을 기간 속성으로 통합
+        properties["기간"] = {
+            "date": {
+                "start": start_date,
+                "end": end_date
+            }
+        }
+        
+        # 추천 종목이 있는 경우만 추가
+        if stocks_multi_select:
+            properties["투자 종목"] = {
+                "multi_select": stocks_multi_select
+            }
+        
+        # 투자 비중 추가
+        properties["투자 비중"] = {
             "rich_text": [
                 {
                     "text": {
-                        "content": recommendation_data.get("weights", "균등 비중")
+                        "content": weights
                     }
                 }
             ]
-        },
-        "결과 평가": {
+        }
+        
+        # 결과 평가 추가 (select 항목이 DB에 존재하는지 확인 필요)
+        properties["결과 평가"] = {
             "select": {
-                "name": recommendation_data.get("recommendation_type", "신규 추천")
+                "name": recommendation_type
             }
         }
-    }
-    
-    # 요청 본문 생성 - 성과 DB ID 대신 추천 DB ID 사용
-    # 필요시 NOTION_RECOMMENDATION_DB_ID 환경 변수 추가하고 교체 필요
-    request_data = {
-        "parent": {
-            "database_id": NOTION_PERFORMANCE_DB_ID  # 임시로 성과 DB 사용, 필요시 전용 DB로 변경
-        },
-        "properties": properties
-    }
-    
-    try:
+        
+        # 요청 본문 생성
+        request_data = {
+            "parent": {
+                "database_id": NOTION_PERFORMANCE_DB_ID
+            },
+            "properties": properties
+        }
+        
+        # 로깅을 위한 요청 데이터 준비
+        logger.info(f"Notion API 요청: {url}")
+        logger.info(f"요청 데이터 properties 키: {list(properties.keys())}")
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 url,
@@ -1209,10 +1261,18 @@ async def create_investment_recommendation(recommendation_data: Dict[str, Any]) 
                 timeout=30.0
             )
             
-            response.raise_for_status()
+            # 응답 내용 확인 (에러 시 상세 내용 로깅)
+            if response.status_code != 200:
+                try:
+                    error_body = response.json()
+                    logger.error(f"Notion API 오류 응답: {error_body}")
+                except:
+                    logger.error(f"Notion API 오류 응답 (텍스트): {response.text}")
+                    
+                response.raise_for_status()
+                
             result = response.json()
-            
-            logger.info(f"추천 기록 생성 성공: {recommendation_data.get('title')}")
+            logger.info(f"추천 기록 생성 성공: {title}")
             return result
             
     except Exception as e:

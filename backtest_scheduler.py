@@ -10,6 +10,7 @@ import concurrent.futures
 
 from notion_utils import query_notion_database, update_notion_page
 from performance_evaluator import backtest_recommendation
+from report_analyzer import find_relevant_reports, analyze_reports_with_llm
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # 로깅 설정
@@ -216,9 +217,34 @@ async def update_schedule_text(page_id: str, current_schedule: str, completed_it
         logger.error(f"예약 문자열 업데이트 중 오류: {str(e)}")
         return False
 
+async def disable_stock_recommendation(page_id: str) -> bool:
+    """
+    종목 추천 체크박스를 비활성화합니다.
+    
+    Args:
+        page_id (str): 에이전트 페이지 ID
+        
+    Returns:
+        bool: 업데이트 성공 여부
+    """
+    try:
+        # 종목 추천 체크박스 비활성화 (체크 해제)
+        properties = {
+            "종목추천": {
+                "checkbox": False
+            }
+        }
+        
+        logger.info(f"종목 추천 체크박스 비활성화: 페이지 ID {page_id}")
+        return await update_notion_page(page_id, properties)
+    
+    except Exception as e:
+        logger.error(f"종목 추천 체크박스 비활성화 중 오류: {str(e)}")
+        return False
+
 async def process_agent_schedules(agent: Dict[str, Any]) -> None:
     """
-    에이전트의 백테스팅 예약을 처리합니다.
+    에이전트의 백테스팅 예약과 종목 추천 설정을 처리합니다.
     
     Args:
         agent (Dict[str, Any]): 에이전트 정보
@@ -226,7 +252,32 @@ async def process_agent_schedules(agent: Dict[str, Any]) -> None:
     page_id = agent.get("id")
     properties = agent.get("properties", {})
     
-    # '백테스팅 예약' 속성 확인
+    # 에이전트 이름 가져오기
+    agent_name = "Unknown"
+    if "에이전트명" in properties and "title" in properties["에이전트명"]:
+        title_objs = properties["에이전트명"]["title"]
+        if title_objs and len(title_objs) > 0:
+            agent_name = title_objs[0].get("plain_text", "Unknown")
+    
+    # 1. 종목 추천 체크박스 확인
+    is_recommendation_enabled = False
+    if "종목추천" in properties and "checkbox" in properties["종목추천"]:
+        is_recommendation_enabled = properties["종목추천"]["checkbox"]
+    
+    if is_recommendation_enabled:
+        logger.info(f"에이전트 '{agent_name}'의 종목 추천 활성화 상태 확인됨")
+        
+        try:
+            # 종목 추천 실행
+            await process_stock_recommendation(page_id, agent_name)
+            
+            # 추천 후 체크박스 비활성화
+            await disable_stock_recommendation(page_id)
+            logger.info(f"에이전트 '{agent_name}'의 종목 추천 처리 완료 및 체크박스 비활성화")
+        except Exception as e:
+            logger.error(f"종목 추천 실행 중 오류: {str(e)}")
+    
+    # 2. '백테스팅 예약' 속성 확인
     if "백테스팅 예약" not in properties:
         return
     
@@ -242,14 +293,7 @@ async def process_agent_schedules(agent: Dict[str, Any]) -> None:
     if not schedule_text:
         return
     
-    # 에이전트 이름 가져오기
-    agent_name = "Unknown"
-    if "에이전트명" in properties and "title" in properties["에이전트명"]:
-        title_objs = properties["에이전트명"]["title"]
-        if title_objs and len(title_objs) > 0:
-            agent_name = title_objs[0].get("plain_text", "Unknown")
-    
-    logger.info(f"에이전트 '{agent_name}' 예약 처리: '{schedule_text}'")
+    logger.info(f"에이전트 '{agent_name}' 백테스팅 예약 처리: '{schedule_text}'")
     
     # 날짜 범위 파싱
     date_ranges = await parse_date_ranges(schedule_text)
@@ -301,85 +345,73 @@ async def process_agent_schedules(agent: Dict[str, Any]) -> None:
     else:
         logger.info(f"에이전트 '{agent_name}'의 처리할 백테스팅 예약이 없거나 모두 실패했습니다.")
 
-async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
+async def process_stock_recommendation(page_id: str, agent_name: str) -> None:
     """
-    예약 문자열에서 날짜 범위를 파싱합니다.
-    줄바꿈 또는 쉼표로 구분된 형식 지원:
+    종목 추천 처리를 실행합니다.
     
-    형식 1 (줄바꿈):
-    0522~0526
-    0601~0605
-    
-    형식 2 (쉼표):
-    0522~0526, 0601~0605
-    
-    Returns:
-        List[Dict[str, str]]: 시작일과 종료일 딕셔너리 리스트
+    Args:
+        page_id (str): 에이전트 페이지 ID
+        agent_name (str): 에이전트 이름
     """
-    date_ranges = []
-    
-    # 입력이 비어있으면 빈 리스트 반환
-    if not schedule_text:
-        return []
+    try:
+        # 에이전트 로드
+        from investment_agent import InvestmentAgent
+        agent = await InvestmentAgent.load_from_notion(page_id)
         
-    # 텍스트 정리
-    cleaned_text = schedule_text.strip()
-    
-    # 먼저 줄바꿈으로 분리
-    lines = [line.strip() for line in cleaned_text.split('\n')]
-    
-    # 각 줄마다 작업
-    items = []
-    for line in lines:
-        if not line:
-            continue
-            
-        # 각 줄 내에서 쉼표로 분리된 항목 처리
-        if ',' in line:
-            comma_items = [item.strip() for item in line.split(',') if item.strip()]
-            items.extend(comma_items)
-        else:
-            items.append(line)
-    
-    # 디버깅용 로그 추가
-    logger.info(f"분석된 예약 항목: {items}")
-    
-    current_year = datetime.now().year
-    
-    for item in items:
-        # 날짜 범위 파싱 (형식: MMDD~MMDD)
-        match = re.match(r'(\d{4})~(\d{4})', item)
+        if not agent:
+            logger.error(f"에이전트를 찾을 수 없습니다: {page_id}")
+            return
         
-        if match:
-            start_mmdd, end_mmdd = match.groups()
-            
-            # MMDD 형식을 YYYY-MM-DD 형식으로 변환
-            try:
-                start_mm, start_dd = int(start_mmdd[:2]), int(start_mmdd[2:])
-                end_mm, end_dd = int(end_mmdd[:2]), int(end_mmdd[2:])
-                
-                # 날짜 유효성 검증 및 변환
-                start_date = f"{current_year}-{start_mm:02d}-{start_dd:02d}"
-                end_date = f"{current_year}-{end_mm:02d}-{end_dd:02d}"
-                
-                # 시작일이 종료일보다 나중인 경우 처리
-                if start_date > end_date:
-                    # 종료일이 다음 해로 넘어간 경우
-                    end_date = f"{current_year + 1}-{end_mm:02d}-{end_dd:02d}"
-                
-                logger.info(f"백테스팅 일정 추가: {start_date} ~ {end_date} (원본: {item})")
-                
-                date_ranges.append({
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "original_text": item
-                })
-            except ValueError as e:
-                logger.error(f"유효하지 않은 날짜 형식: {item} - {str(e)}")
-        else:
-            logger.warning(f"잘못된 형식의 예약 항목 건너뜀: {item}")
-    
-    return date_ranges
+        # 현재 날짜
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # 최근 보고서 검색
+        reports = await find_relevant_reports(
+            agent=agent,
+            max_reports=10  # 최대 10개 보고서 가져오기
+        )
+        
+        if not reports:
+            logger.warning(f"에이전트 '{agent_name}'의 조건에 맞는 최근 보고서를 찾을 수 없습니다.")
+            return
+        
+        # 투자 기간은 기본 7일로 설정
+        investment_period = 7
+        
+        # 보고서 분석 및 종목 추천
+        logger.info(f"에이전트 '{agent_name}'의 종목 추천 분석 시작 (보고서 {len(reports)}개 사용)")
+        recommendation_result = await analyze_reports_with_llm(
+            reports=reports,
+            agent=agent,
+            max_stocks=5,
+            investment_period=investment_period
+        )
+        
+        # 추천 종목 수 확인
+        recommended_stocks = recommendation_result.get("recommended_stocks", [])
+        if not recommended_stocks:
+            logger.warning(f"에이전트 '{agent_name}'의 추천 종목이 없습니다.")
+            return
+        
+        # 노션 DB에 추천 기록 저장
+        from notion_utils import create_recommendation_record
+        
+        # 제목 형식 설정 (n종목추천)
+        title_prefix = f"{len(recommended_stocks)}종목추천"
+        
+        # 추천 기록 저장
+        await create_recommendation_record(
+            agent_page_id=page_id,
+            recommendations=recommendation_result,
+            investment_period=investment_period,
+            title_prefix=title_prefix  # 커스텀 제목 형식 전달
+        )
+        
+        logger.info(f"에이전트 '{agent_name}'의 종목 추천 처리 완료: {len(recommended_stocks)}개 종목")
+        
+    except Exception as e:
+        logger.error(f"종목 추천 처리 중 오류: {str(e)}")
+        raise  # 상위 함수에서 처리할 수 있도록 예외 다시 발생
 
 async def clear_schedule_text(page_id: str) -> bool:
     """
@@ -408,10 +440,10 @@ async def clear_schedule_text(page_id: str) -> bool:
 
 async def check_backtest_schedules() -> None:
     """
-    Notion DB에서 백테스팅 예약이 있는 에이전트를 확인하고 처리합니다.
+    Notion DB에서 백테스팅 예약이 있거나 종목 추천이 활성화된 에이전트를 확인하고 처리합니다.
     """
     try:
-        logger.info("백테스팅 예약 확인 시작")
+        logger.info("백테스팅 예약 및 종목 추천 확인 시작")
         
         # 에이전트 DB 쿼리
         agents = await query_notion_database(NOTION_AGENT_DB_ID)
@@ -421,9 +453,9 @@ async def check_backtest_schedules() -> None:
         for agent in agents:
             await process_agent_schedules(agent)
             
-        logger.info(f"백테스팅 예약 확인 완료: {len(agents)}개 에이전트 처리")
+        logger.info(f"백테스팅 예약 및 종목 추천 확인 완료: {len(agents)}개 에이전트 처리")
     except Exception as e:
-        logger.error(f"백테스팅 예약 확인 중 오류: {str(e)}")
+        logger.error(f"백테스팅 예약 및 종목 추천 확인 중 오류: {str(e)}")
 
 # 스케줄러 인스턴스 생성 - BackgroundScheduler 사용
 scheduler = BackgroundScheduler()
