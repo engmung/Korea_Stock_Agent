@@ -888,20 +888,6 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                         },
                         {
                             "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"예상 수익률: {stock.get('expected_return', '미제공')}"}}]
-                            }
-                        },
-                        {
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"위험도: {stock.get('risk_level', '미제공')}"}}]
-                            }
-                        },
-                        {
-                            "object": "block",
                             "type": "paragraph",
                             "paragraph": {
                                 "rich_text": [{"type": "text", "text": {"content": f"추천 이유: {stock.get('reasoning', '미제공')}"}}]
@@ -1249,20 +1235,6 @@ async def add_structured_recommendation_content(page_id: str, recommendations: D
                                         "annotations": {"bold": True}
                                     }
                                 ]
-                            }
-                        },
-                        {
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"예상 수익률: {stock.get('expected_return', '미제공')}"}}]
-                            }
-                        },
-                        {
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"위험도: {stock.get('risk_level', '미제공')}"}}]
                             }
                         },
                         {
