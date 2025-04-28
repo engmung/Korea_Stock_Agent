@@ -170,7 +170,8 @@ async def get_notion_page_content(page_id: str, max_retries: int = 3, timeout: f
                     has_more = result.get("has_more", False)
                     next_cursor = result.get("next_cursor")
                     
-                    logger.info(f"블록 조회: {len(blocks)}개, 총 {len(all_blocks)}개")
+                    # DEBUG 레벨로 변경
+                    logger.debug(f"블록 조회: {len(blocks)}개, 총 {len(all_blocks)}개")
                     break  # 성공적으로 가져왔으므로 재시도 루프 종료
                     
             except Exception as e:
@@ -180,7 +181,7 @@ async def get_notion_page_content(page_id: str, max_retries: int = 3, timeout: f
                 else:
                     has_more = False  # 더 이상 시도하지 않음
                     break
-    
+
     # 블록을 마크다운으로 변환
     content = blocks_to_markdown(all_blocks)
     
@@ -545,7 +546,7 @@ async def add_content_to_notion_page(page_id: str, content: str, title: str = "�
         logger.error(f"페이지 {page_id}에 콘텐츠 추가 실패: {str(e)}")
         return False
 
-async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[str, Any], title: str = "백테스팅 결과") -> bool:
+async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[str, Any], title: str = "백테스팅 상세 결과") -> bool:
     """
     노션 페이지에 구조화된 형식으로 백테스팅 결과를 추가합니다.
     """
@@ -556,10 +557,9 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
         "Content-Type": "application/json"
     }
     
-    # 기본 헤더 블록 추가
     try:
-        # 단계별로 블록 추가 - 첫 번째: 헤더와 기본 정보
-        basic_blocks = [
+        # 1. 헤더 섹션: 제목과 투자 기간
+        header_blocks = [
             # 헤딩 블록 추가
             {
                 "object": "block",
@@ -567,36 +567,32 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                 "heading_2": {
                     "rich_text": [{"type": "text", "text": {"content": title}}]
                 }
-            }
-        ]
-        
-        # 투자 기간 정보 추가
-        if "start_date" in debug_info and "end_date" in debug_info:
-            basic_blocks.append({
+            },
+            {
                 "object": "block",
                 "type": "paragraph",
                 "paragraph": {
                     "rich_text": [{"type": "text", "text": {"content": f"📅 투자 기간: {debug_info.get('start_date', '')} ~ {debug_info.get('end_date', '')}"}}]
                 }
-            })
+            }
+        ]
         
-        # 먼저 기본 블록 추가
-        basic_request = {"children": basic_blocks}
+        # 헤더 블록 추가
+        header_request = {"children": header_blocks}
         async with httpx.AsyncClient() as client:
             response = await client.patch(
                 url, 
                 headers=headers, 
-                json=basic_request,
+                json=header_request,
                 timeout=30.0
             )
             response.raise_for_status()
-            logger.info(f"기본 블록 추가 성공: {page_id}")
+            logger.debug("헤더 블록 추가 성공")
         
-        # 보고서 선택 전략 정보 추가
+        # 2. 데이터 선택 전략 섹션
         if "report_selection_result" in debug_info:
             selection_info = debug_info["report_selection_result"]
             
-            # 헤더 및 선택 전략 추가
             selection_blocks = {
                 "children": [
                     {
@@ -623,7 +619,42 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                 ]
             }
             
-            # 페이지에 블록 추가
+            # 선택된 보고서 목록 추가
+            if "selection_details" in selection_info and selection_info["selection_details"]:
+                details = selection_info["selection_details"]
+                # 최대 10개만 표시
+                display_details = details[:min(10, len(details))]
+                
+                # 보고서 목록 헤더 추가
+                selection_blocks["children"].append({
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [{"type": "text", "text": {"content": "선택된 보고서 목록:"}}]
+                    }
+                })
+                
+                # 각 보고서 정보 추가
+                for detail in display_details:
+                    selection_blocks["children"].append({
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": [{"type": "text", "text": {"content": f"[{detail.get('channel', '')}] {detail.get('title', '')} ({detail.get('date', '')})"}}]
+                        }
+                    })
+                
+                # 더 많은 보고서 표시
+                if len(details) > 10:
+                    selection_blocks["children"].append({
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{"type": "text", "text": {"content": f"외 {len(details) - 10}개 보고서..."}}]
+                        }
+                    })
+            
+            # 선택 전략 블록 추가
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     url, 
@@ -632,153 +663,76 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                     timeout=30.0
                 )
                 response.raise_for_status()
+                logger.debug("데이터 선택 전략 블록 추가 성공")
+        
+        # 3. 포트폴리오 성과 요약 섹션
+        if "performance_metrics" in debug_info:
+            metrics = debug_info["performance_metrics"]
             
-            # 선택된 보고서 상세 정보 추가 (최대 10개만 표시)
-            if "selection_details" in selection_info and selection_info["selection_details"]:
-                details = selection_info["selection_details"]
-                
-                # 최대 10개만 표시
-                display_details = details[:min(10, len(details))]
-                
-                details_blocks = {
-                    "children": [
-                        {
-                            "object": "block",
-                            "type": "paragraph",
-                            "paragraph": {
-                                "rich_text": [{"type": "text", "text": {"content": "선택된 보고서 목록:"}}]
-                            }
+            performance_blocks = {
+                "children": [
+                    {
+                        "object": "block",
+                        "type": "heading_3",
+                        "heading_3": {
+                            "rich_text": [{"type": "text", "text": {"content": "📊 포트폴리오 성과 요약"}}]
                         }
-                    ]
-                }
-                
-                # 각 보고서별 정보 추가 - 개선된 형식으로 표시
-                for idx, detail in enumerate(display_details):
-                    report_id = detail.get("id", "")
-                    title = detail.get("title", "제목 없음")
-                    channel = detail.get("channel", "채널 없음")
-                    date = detail.get("date", "날짜 없음")
-                    
-                    details_blocks["children"].append({
+                    },
+                    {
                         "object": "block",
                         "type": "bulleted_list_item",
                         "bulleted_list_item": {
-                            "rich_text": [{"type": "text", "text": {"content": f"{idx+1}. [{channel}] {title} ({date})"}}]
+                            "rich_text": [{"type": "text", "text": {"content": f"총 수익률: {metrics.get('portfolio_return', 0):.2f}%"}}]
                         }
-                    })
-                
-                # 더 많은 보고서가 있는 경우 메시지 추가
-                if len(details) > 10:
-                    details_blocks["children"].append({
+                    },
+                    {
                         "object": "block",
-                        "type": "paragraph",
-                        "paragraph": {
-                            "rich_text": [{"type": "text", "text": {"content": f"외 {len(details) - 10}개 보고서..."}}]
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": [{"type": "text", "text": {"content": f"총 수익금: {metrics.get('portfolio_profit', 0):,.0f}원"}}]
                         }
-                    })
-                
-                # 선택된 보고서 상세 정보 블록 추가
-                async with httpx.AsyncClient() as client:
-                    response = await client.patch(
-                        url, 
-                        headers=headers, 
-                        json=details_blocks,
-                        timeout=30.0
-                    )
-                    response.raise_for_status()
-                
-                # 구분선 추가
-                divider_block = {
-                    "children": [
-                        {
-                            "object": "block",
-                            "type": "divider",
-                            "divider": {}
+                    },
+                    {
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": [{"type": "text", "text": {"content": f"승률: {metrics.get('win_rate', 0):.1f}%"}}]
                         }
-                    ]
-                }
-                
-                async with httpx.AsyncClient() as client:
-                    response = await client.patch(
-                        url, 
-                        headers=headers, 
-                        json=divider_block,
-                        timeout=30.0
-                    )
-                    response.raise_for_status()
-            
-            logger.info(f"보고서 선택 정보 블록 추가 성공: {page_id}")
-            
-        # 성과 요약 정보 추가
-        if "performance_metrics" in debug_info:
-            metrics = debug_info["performance_metrics"]
-            summary_blocks = [
-                {
-                    "object": "block",
-                    "type": "heading_3",
-                    "heading_3": {
-                        "rich_text": [{"type": "text", "text": {"content": "📊 포트폴리오 성과 요약"}}]
+                    },
+                    {
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": [{"type": "text", "text": {"content": f"평균 낙폭: {metrics.get('avg_max_drawdown', 0):.2f}%"}}]
+                        }
+                    },
+                    {
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": [{"type": "text", "text": {"content": f"결과 평가: {metrics.get('evaluation', '평가 없음')}"}}]
+                        }
                     }
-                },
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": f"• 총 수익률: {metrics.get('portfolio_return', 0):.2f}%"}}]
-                    }
-                },
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": f"• 총 수익금: {metrics.get('portfolio_profit', 0):,.0f}원"}}]
-                    }
-                },
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": f"• 승률: {metrics.get('win_rate', 0):.1f}%"}}]
-                    }
-                },
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": f"• 평균 낙폭: {metrics.get('avg_max_drawdown', 0):.2f}%"}}]
-                    }
-                },
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": f"• 결과 평가: {metrics.get('evaluation', '평가 없음')}"}}]
-                    }
-                }
-            ]
+                ]
+            }
             
             # 성과 요약 블록 추가
-            summary_request = {"children": summary_blocks}
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     url, 
                     headers=headers, 
-                    json=summary_request,
+                    json=performance_blocks,
                     timeout=30.0
                 )
                 response.raise_for_status()
-                logger.info(f"성과 요약 블록 추가 성공: {page_id}")
-            
-        # 종목별 성과 추가
+                logger.debug("성과 요약 블록 추가 성공")
+        
+        # 4. 종목별 성과 섹션
         if "backtest_result" in debug_info and "stock_results" in debug_info["backtest_result"]:
             backtest = debug_info["backtest_result"]
-            stock_results = backtest.get("stock_results", [])
             
-            # 종목 매핑 정보
-            stock_ticker_mapping = debug_info.get("stock_ticker_mapping", {})
-            
-            # 헤더 먼저 추가
-            header_block = {
+            # 종목별 성과 헤더 추가
+            stock_header = {
                 "children": [
                     {
                         "object": "block",
@@ -801,40 +755,21 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                 response = await client.patch(
                     url, 
                     headers=headers, 
-                    json=header_block,
+                    json=stock_header,
                     timeout=30.0
                 )
                 response.raise_for_status()
+            
+            # 종목 티커 매핑 정보
+            stock_ticker_mapping = debug_info.get("stock_ticker_mapping", {})
+            stock_results = backtest.get("stock_results", [])
+            
+            # 각 종목에 대해 상세 정보 블록 추가
+            for stock in stock_results:
+                ticker = stock.get("ticker", "")
+                name = stock.get("name", stock_ticker_mapping.get(ticker, ""))
                 
-            # 각 종목별로 별도 항목 추가
-            for item in backtest.get("performance_summary", []):
-                # 같은 티커의 stock_results 항목 찾기
-                ticker = item.get("ticker", "")
-                stock_detail = next((s for s in stock_results if s.get("ticker") == ticker), {})
-                
-                # 종목명 가져오기 - 매핑, 실제 종목명, 추천정보 순으로 확인
-                stock_name = stock_ticker_mapping.get(ticker, "")
-                
-                if not stock_name:
-                    # 결과에 저장된 종목명 확인
-                    stock_name = stock_detail.get("name", "")
-                    
-                # 종목명이 "종목 코드" 형식이면 클린업
-                if not stock_name or (stock_name.startswith("종목 ") and ticker in stock_name):
-                    # 추천 종목 정보에서 찾기
-                    if "recommendations" in debug_info and "recommended_stocks" in debug_info["recommendations"]:
-                        recommended_stocks = debug_info["recommendations"]["recommended_stocks"]
-                        for rec_stock in recommended_stocks:
-                            if rec_stock.get("ticker") == ticker:
-                                stock_name = rec_stock.get("name", "")
-                                break
-                
-                # 그래도 없거나 "종목 코드" 형식이면 정리
-                if not stock_name or stock_name.startswith("종목 "):
-                    stock_name = ticker  # 티커 코드라도 보여주기
-                
-                # 종목 정보 블록
-                stock_blocks = {
+                stock_detail = {
                     "children": [
                         {
                             "object": "block",
@@ -843,7 +778,7 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                                 "rich_text": [
                                     {
                                         "type": "text", 
-                                        "text": {"content": f"🔹 {stock_name} ({ticker})"}, 
+                                        "text": {"content": f"🔹 {name} ({ticker})"},
                                         "annotations": {"bold": True}
                                     }
                                 ]
@@ -853,57 +788,57 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                             "object": "block",
                             "type": "bulleted_list_item",
                             "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"수익률: {item.get('profit_percentage', 0):.2f}%"}}]
+                                "rich_text": [{"type": "text", "text": {"content": f"수익률: {stock.get('profit_percentage', 0):.2f}%"}}]
                             }
                         },
                         {
                             "object": "block",
                             "type": "bulleted_list_item",
                             "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"구매가격: {stock_detail.get('initial_price', 0):,.0f}원"}}]
+                                "rich_text": [{"type": "text", "text": {"content": f"구매가격: {stock.get('initial_price', 0):,.0f}원"}}]
                             }
                         },
                         {
                             "object": "block",
                             "type": "bulleted_list_item",
                             "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"판매가격: {stock_detail.get('final_price', 0):,.0f}원"}}]
+                                "rich_text": [{"type": "text", "text": {"content": f"판매가격: {stock.get('final_price', 0):,.0f}원"}}]
                             }
                         },
                         {
                             "object": "block",
                             "type": "bulleted_list_item",
                             "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"수익금: {item.get('profit', 0):,.0f}원"}}]
+                                "rich_text": [{"type": "text", "text": {"content": f"수익금: {stock.get('profit', 0):,.0f}원"}}]
                             }
                         },
                         {
                             "object": "block",
                             "type": "bulleted_list_item",
                             "bulleted_list_item": {
-                                "rich_text": [{"type": "text", "text": {"content": f"최종 평가액: {item.get('final_value', 0):,.0f}원"}}]
+                                "rich_text": [{"type": "text", "text": {"content": f"최종 평가액: {stock.get('final_value', 0):,.0f}원"}}]
                             }
                         }
                     ]
                 }
                 
+                # 각 종목 블록 추가
                 async with httpx.AsyncClient() as client:
                     response = await client.patch(
                         url, 
                         headers=headers, 
-                        json=stock_blocks,
+                        json=stock_detail,
                         timeout=30.0
                     )
                     response.raise_for_status()
             
-            logger.info(f"종목별 성과 블록 추가 성공: {page_id}")
+            logger.debug("종목별 성과 블록 추가 성공")
         
-        # 추천 종목 정보 추가
+        # 5. 추천 종목 분석 섹션
         if "recommendations" in debug_info and "recommended_stocks" in debug_info["recommendations"]:
-            recommended_stocks = debug_info["recommendations"]["recommended_stocks"]
-            portfolio_logic = debug_info["recommendations"].get("portfolio_logic", "")
+            recommendations = debug_info["recommendations"]
             
-            # 헤더와 포트폴리오 논리 추가
+            # 추천 종목 분석 헤더 및 포트폴리오 논리 추가
             recommendation_header = {
                 "children": [
                     {
@@ -917,13 +852,8 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                         "object": "block",
                         "type": "paragraph",
                         "paragraph": {
-                            "rich_text": [{"type": "text", "text": {"content": portfolio_logic}}]
+                            "rich_text": [{"type": "text", "text": {"content": recommendations.get("portfolio_logic", "")}}]
                         }
-                    },
-                    {
-                        "object": "block",
-                        "type": "divider",
-                        "divider": {}
                     }
                 ]
             }
@@ -937,12 +867,11 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                 )
                 response.raise_for_status()
             
-            # 각 종목별 정보 추가
-            for stock in recommended_stocks:
-                # 티커 정보 추가
+            # 각 추천 종목에 대한 상세 정보 추가
+            for stock in recommendations.get("recommended_stocks", []):
                 ticker_display = f" ({stock.get('ticker', '')})" if "ticker" in stock else ""
                 
-                stock_info = {
+                stock_detail = {
                     "children": [
                         {
                             "object": "block",
@@ -951,7 +880,7 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                                 "rich_text": [
                                     {
                                         "type": "text", 
-                                        "text": {"content": f"🔹 {stock.get('name', '')}{ticker_display}"}, 
+                                        "text": {"content": f"🔹 {stock.get('name', '')}{ticker_display}"},
                                         "annotations": {"bold": True}
                                     }
                                 ]
@@ -977,85 +906,26 @@ async def add_structured_content_to_notion_page(page_id: str, debug_info: Dict[s
                             "paragraph": {
                                 "rich_text": [{"type": "text", "text": {"content": f"추천 이유: {stock.get('reasoning', '미제공')}"}}]
                             }
-                        },
-                        {
-                            "object": "block",
-                            "type": "divider",
-                            "divider": {}
                         }
                     ]
                 }
                 
+                # 각 종목 블록 추가
                 async with httpx.AsyncClient() as client:
                     response = await client.patch(
                         url, 
                         headers=headers, 
-                        json=stock_info,
+                        json=stock_detail,
                         timeout=30.0
                     )
                     response.raise_for_status()
             
-            logger.info(f"추천 종목 블록 추가 성공: {page_id}")
-        
-        # 원본 분석 텍스트 추가 (다시 추가)
-        if "recommendations" in debug_info and "analysis_text" in debug_info["recommendations"]:
-            analysis_text = debug_info["recommendations"]["analysis_text"]
-            
-            # 너무 긴 텍스트는 나누어 처리
-            max_length = 1900  # 안전한 길이로 설정
-            text_chunks = [analysis_text[i:i+max_length] for i in range(0, len(analysis_text), max_length)]
-            
-            # 분석 텍스트 헤더 추가
-            analysis_header = {
-                "children": [
-                    {
-                        "object": "block",
-                        "type": "heading_3",
-                        "heading_3": {
-                            "rich_text": [{"type": "text", "text": {"content": "원본 분석 텍스트"}}]
-                        }
-                    }
-                ]
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.patch(
-                    url, 
-                    headers=headers, 
-                    json=analysis_header,
-                    timeout=30.0
-                )
-                response.raise_for_status()
-            
-            # 각 청크별로 단락 추가
-            for chunk in text_chunks:
-                chunk_block = {
-                    "children": [
-                        {
-                            "object": "block",
-                            "type": "paragraph",
-                            "paragraph": {
-                                "rich_text": [{"type": "text", "text": {"content": chunk}}]
-                            }
-                        }
-                    ]
-                }
-                
-                async with httpx.AsyncClient() as client:
-                    response = await client.patch(
-                        url, 
-                        headers=headers, 
-                        json=chunk_block,
-                        timeout=30.0
-                    )
-                    response.raise_for_status()
-            
-            logger.info(f"분석 텍스트 블록 추가 성공: {page_id}")
+            logger.debug("추천 종목 분석 블록 추가 성공")
         
         return True
-        
+    
     except Exception as e:
-        logger.error(f"Notion 페이지 컨텐츠 추가 실패: {str(e)}")
+        logger.error(f"백테스팅 결과 저장 중 오류: {str(e)}")
         return False
 
 async def create_recommendation_record(agent_page_id: str, recommendations: Dict[str, Any], investment_period: int, title_prefix: str = None) -> bool:
@@ -1627,14 +1497,8 @@ async def create_investment_performance(performance_data: Dict[str, Any]) -> Opt
                 # 디버깅 정보 추출
                 debug_info = performance_data.get("debug_info", {})
                 if debug_info:
-                    # 각 디버깅 정보 섹션을 별도로 추가
-                    for title, content in debug_info.items():
-                        content_str = (
-                            json.dumps(content, ensure_ascii=False, indent=2) 
-                            if isinstance(content, (dict, list)) 
-                            else str(content)
-                        )
-                        await add_content_to_notion_page(page_id, content_str, title)
+                    # 구조화된 형식으로 디버깅 정보 추가
+                    await add_structured_content_to_notion_page(page_id, debug_info, "백테스팅 상세 결과")
             
             return result
             

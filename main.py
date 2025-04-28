@@ -7,6 +7,14 @@ from dotenv import load_dotenv
 import logging
 from datetime import datetime
 
+# 불필요한 로그 출력 줄이기
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+logging.getLogger("google.genai").setLevel(logging.WARNING)
+# HTTP, API 호출 관련 로그는 WARNING 이상만 표시
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+
 # 환경 변수 로드
 load_dotenv()
 

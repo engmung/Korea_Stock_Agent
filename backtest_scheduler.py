@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 from functools import wraps
 import concurrent.futures
 
-from notion_utils import query_notion_database, update_notion_page
+from notion_utils import update_notion_page
 from performance_evaluator import backtest_recommendation
 from report_analyzer import find_relevant_reports, analyze_reports_with_llm
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,9 +27,11 @@ is_backtest_running = False
 def run_backtest_scheduler():
     """
     APScheduler에서 호출할 동기 함수입니다.
-    별도의 스레드에서 이벤트 루프를 생성하고 비동기 함수를 실행합니다.
+    백테스팅 시스템을 시작합니다.
     """
     global is_backtest_running
+    
+    logger.info("===== 백테스팅 스케줄러 실행 시작 =====")
     
     # 이미 실행 중이면 스킵
     if is_backtest_running:
@@ -39,19 +41,42 @@ def run_backtest_scheduler():
     try:
         # 실행 중 플래그 설정
         is_backtest_running = True
-        logger.info("백테스팅 스케줄러 실행 - 새 스레드에서 비동기 함수 호출")
+        logger.info("백테스팅 실행 플래그를 True로 설정")
         
-        # 새 스레드에서 이벤트 루프 실행
+        # 병렬 처리 시스템을 통한 백테스팅 시도 (기존 방식 직접 호출은 제거)
+        logger.info("병렬 처리 시스템을 통한 백테스팅 시도")
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(run_async_in_thread, check_backtest_schedules)
             try:
-                # 결과 대기 (예외가 있으면 다시 발생)
-                future.result()
+                # 최대 실행 시간 제한 설정 (예: 4분)
+                timeout_seconds = 240
+                
+                future = executor.submit(run_async_in_thread, start_parallel_system)
+                logger.info("병렬 시스템 작업 제출됨")
+                
+                # 결과 대기 (타임아웃 적용)
+                try:
+                    future.result(timeout=timeout_seconds)
+                    logger.info("병렬 시스템 실행 완료")
+                except concurrent.futures.TimeoutError:
+                    logger.warning(f"병렬 시스템 실행이 {timeout_seconds}초 내에 완료되지 않아 다음 실행을 위해 종료합니다.")
+                    # 다음 실행을 위해 플래그 재설정
+                    is_backtest_running = False
+                    logger.info("타임아웃으로 백테스팅 실행 플래그를 False로 재설정")
+                    return
+                
             except Exception as e:
-                logger.error(f"백테스팅 스케줄러 실행 중 오류: {str(e)}")
+                logger.error(f"병렬 백테스팅 시스템 실행 중 오류: {str(e)}")
+                import traceback
+                logger.error(f"병렬 시스템 오류 상세: {traceback.format_exc()}")
+    except Exception as e:
+        logger.error(f"백테스팅 스케줄러 전체 실행 중 오류: {str(e)}")
+        import traceback
+        logger.error(f"스케줄러 오류 상세: {traceback.format_exc()}")
     finally:
         # 실행 완료 후 플래그 해제
         is_backtest_running = False
+        logger.info("백테스팅 실행 플래그를 False로 재설정")
+        logger.info("===== 백테스팅 스케줄러 실행 완료 =====")
 
 def run_async_in_thread(async_func):
     """
@@ -68,6 +93,30 @@ def run_async_in_thread(async_func):
     finally:
         # 루프 닫기
         loop.close()
+
+async def start_parallel_system():
+    """병렬 백테스팅 시스템을 시작하고 완료될 때까지 대기합니다."""
+    from backtest_parallel import BacktestParallelSystem
+    
+    # 워커 수 설정 (환경 변수 또는 기본값 3)
+    num_workers = int(os.environ.get("BACKTEST_NUM_WORKERS", 3))
+    
+    # 병렬 시스템 생성
+    system = BacktestParallelSystem(num_workers=num_workers)
+    
+    try:
+        # 시스템 시작
+        await system.start()
+        
+        # 백테스팅 사이클 실행
+        await system.run_backtest_cycle()
+        
+        # 모든 작업 완료 대기 (최대 1시간)
+        await system.wait_for_completion(timeout=3600)
+        
+    finally:
+        # 시스템 중지
+        await system.stop()
 
 async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
     """
@@ -147,7 +196,7 @@ async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
     
     return date_ranges
 
-async def update_schedule_text(page_id: str, current_schedule: str, completed_item: str) -> bool:
+async def update_schedule_text(page_id: str, current_schedule: str, completed_item: str, notion_api_manager=None) -> bool:
     """
     완료된 백테스팅 일정을 예약 문자열에서 제거합니다.
     
@@ -155,6 +204,7 @@ async def update_schedule_text(page_id: str, current_schedule: str, completed_it
         page_id (str): 에이전트 페이지 ID
         current_schedule (str): 현재 예약 문자열
         completed_item (str): 완료된 예약 항목
+        notion_api_manager: 노션 API 관리자 (선택 사항)
         
     Returns:
         bool: 업데이트 성공 여부
@@ -211,18 +261,24 @@ async def update_schedule_text(page_id: str, current_schedule: str, completed_it
         }
         
         logger.info(f"예약 문자열 업데이트: '{current_schedule}' -> '{new_schedule}' (완료 항목: '{completed_item}')")
-        return await update_notion_page(page_id, properties)
+        
+        # API 관리자 사용 여부에 따라 다른 방식으로 호출
+        if notion_api_manager:
+            return await notion_api_manager.update_notion_page(page_id, properties)
+        else:
+            return await update_notion_page(page_id, properties)
     
     except Exception as e:
         logger.error(f"예약 문자열 업데이트 중 오류: {str(e)}")
         return False
 
-async def disable_stock_recommendation(page_id: str) -> bool:
+async def disable_stock_recommendation(page_id: str, notion_api_manager=None) -> bool:
     """
     종목 추천 체크박스를 비활성화합니다.
     
     Args:
         page_id (str): 에이전트 페이지 ID
+        notion_api_manager: 노션 API 관리자 (선택 사항)
         
     Returns:
         bool: 업데이트 성공 여부
@@ -236,21 +292,39 @@ async def disable_stock_recommendation(page_id: str) -> bool:
         }
         
         logger.info(f"종목 추천 체크박스 비활성화: 페이지 ID {page_id}")
-        return await update_notion_page(page_id, properties)
+        
+        # API 관리자 사용 여부에 따라 다른 방식으로 호출
+        if notion_api_manager:
+            return await notion_api_manager.update_notion_page(page_id, properties)
+        else:
+            return await update_notion_page(page_id, properties)
     
     except Exception as e:
         logger.error(f"종목 추천 체크박스 비활성화 중 오류: {str(e)}")
         return False
 
-async def process_agent_schedules(agent: Dict[str, Any]) -> None:
+async def process_agent_schedules(
+    agent: Dict[str, Any], 
+    worker_id: str = None,
+    notion_api_manager = None,
+    gemini_api_manager = None,
+    dispatcher = None  # 디스패처 참조 추가
+) -> None:
     """
     에이전트의 백테스팅 예약과 종목 추천 설정을 처리합니다.
     
     Args:
         agent (Dict[str, Any]): 에이전트 정보
+        worker_id (str): 워커 ID (병렬 처리용)
+        notion_api_manager: 노션 API 관리자 (선택 사항)
+        gemini_api_manager: Gemini API 관리자 (선택 사항)
+        dispatcher: 디스패처 참조 (예약 분산 처리용)
     """
     page_id = agent.get("id")
     properties = agent.get("properties", {})
+    
+    # 로그 접두어 (워커 ID가 있으면 포함)
+    log_prefix = f"[{worker_id}] " if worker_id else ""
     
     # 에이전트 이름 가져오기
     agent_name = "Unknown"
@@ -265,17 +339,26 @@ async def process_agent_schedules(agent: Dict[str, Any]) -> None:
         is_recommendation_enabled = properties["종목추천"]["checkbox"]
     
     if is_recommendation_enabled:
-        logger.info(f"에이전트 '{agent_name}'의 종목 추천 활성화 상태 확인됨")
+        logger.info(f"{log_prefix}에이전트 '{agent_name}'의 종목 추천 활성화 상태 확인됨")
         
         try:
             # 종목 추천 실행
-            await process_stock_recommendation(page_id, agent_name)
+            await process_stock_recommendation(
+                page_id=page_id, 
+                agent_name=agent_name,
+                worker_id=worker_id,
+                notion_api_manager=notion_api_manager,
+                gemini_api_manager=gemini_api_manager
+            )
             
             # 추천 후 체크박스 비활성화
-            await disable_stock_recommendation(page_id)
-            logger.info(f"에이전트 '{agent_name}'의 종목 추천 처리 완료 및 체크박스 비활성화")
+            await disable_stock_recommendation(
+                page_id=page_id,
+                notion_api_manager=notion_api_manager
+            )
+            logger.info(f"{log_prefix}에이전트 '{agent_name}'의 종목 추천 처리 완료 및 체크박스 비활성화")
         except Exception as e:
-            logger.error(f"종목 추천 실행 중 오류: {str(e)}")
+            logger.error(f"{log_prefix}종목 추천 실행 중 오류: {str(e)}")
     
     # 2. '백테스팅 예약' 속성 확인
     if "백테스팅 예약" not in properties:
@@ -293,11 +376,11 @@ async def process_agent_schedules(agent: Dict[str, Any]) -> None:
     if not schedule_text:
         return
     
-    logger.info(f"에이전트 '{agent_name}' 백테스팅 예약 처리: '{schedule_text}'")
+    logger.info(f"{log_prefix}에이전트 '{agent_name}' 백테스팅 예약 처리: '{schedule_text}'")
     
     # 날짜 범위 파싱
     date_ranges = await parse_date_ranges(schedule_text)
-    logger.info(f"파싱된 백테스팅 예약: {len(date_ranges)}개")
+    logger.info(f"{log_prefix}파싱된 백테스팅 예약: {len(date_ranges)}개")
     
     # 현재 날짜
     today = datetime.now().strftime("%Y-%m-%d")
@@ -306,11 +389,31 @@ async def process_agent_schedules(agent: Dict[str, Any]) -> None:
     pending_backtests = [dr for dr in date_ranges if dr["end_date"] <= today]
     
     if pending_backtests:
-        logger.info(f"에이전트 '{agent_name}'의 처리 예정 백테스팅: {len(pending_backtests)}개")
+        logger.info(f"{log_prefix}에이전트 '{agent_name}'의 처리 예정 백테스팅: {len(pending_backtests)}개")
         for i, bt in enumerate(pending_backtests):
-            logger.info(f"  {i+1}. {bt['start_date']} ~ {bt['end_date']} (원본: {bt['original_text']})")
+            logger.info(f"{log_prefix}  {i+1}. {bt['start_date']} ~ {bt['end_date']} (원본: {bt['original_text']})")
     
-    # 처리 여부 플래그
+    # 디스패처가 제공되면 개별 예약을 분산 처리
+    if dispatcher and len(pending_backtests) > 1:
+        logger.info(f"{log_prefix}에이전트 '{agent_name}'의 {len(pending_backtests)}개 예약을 분산 처리합니다.")
+        
+        # 각 예약을 개별 작업으로 디스패처에 전달
+        for date_range in pending_backtests:
+            # 예약 작업 생성
+            backtest_task = {
+                "agent_id": page_id,
+                "agent_name": agent_name,
+                "date_range": date_range,
+                "type": "backtest_reservation"
+            }
+            
+            # 디스패처에 작업 전달
+            await dispatcher.dispatch_backtest_task(backtest_task)
+        
+        # 예약 처리 후 필드 비우기 (개별 작업이 완료될 때 수행되므로 여기서는 하지 않음)
+        return
+    
+    # 디스패처가 없거나 예약이 1개 이하인 경우 기존 방식으로 처리
     processed_any = False
     
     # 각 백테스팅 예약 처리
@@ -319,47 +422,82 @@ async def process_agent_schedules(agent: Dict[str, Any]) -> None:
         end_date = date_range["end_date"]
         original_text = date_range["original_text"]
         
-        logger.info(f"에이전트 '{agent_name}'의 백테스팅 실행: {start_date} ~ {end_date} (원본: {original_text})")
+        logger.info(f"{log_prefix}에이전트 '{agent_name}'의 백테스팅 실행: {start_date} ~ {end_date} (원본: {original_text})")
         
         try:
-            # 백테스팅 실행
-            result = await backtest_recommendation(
-                page_id=page_id, 
-                start_date=start_date,
-                end_date=end_date,
-                investment_amount=1000000  # 기본 투자금액
-            )
+            # 백테스팅 실행 - API 관리자 사용 여부에 따라 다른 방식으로 호출
+            if gemini_api_manager and worker_id:
+                # 병렬 처리 시 워커 ID 전달
+                result = await backtest_recommendation(
+                    page_id=page_id, 
+                    start_date=start_date,
+                    end_date=end_date,
+                    investment_amount=1000000,  # 기본 투자금액
+                    worker_id=worker_id,
+                    notion_api_manager=notion_api_manager,
+                    gemini_api_manager=gemini_api_manager
+                )
+            else:
+                # 기존 방식
+                result = await backtest_recommendation(
+                    page_id=page_id, 
+                    start_date=start_date,
+                    end_date=end_date,
+                    investment_amount=1000000  # 기본 투자금액
+                )
             
             if result.get("status") == "success":
                 processed_any = True
-                logger.info(f"백테스팅 완료: {original_text}")
+                logger.info(f"{log_prefix}백테스팅 완료: {original_text}")
             else:
-                logger.error(f"백테스팅 실패: {result.get('message')}")
+                logger.error(f"{log_prefix}백테스팅 실패: {result.get('message')}")
         except Exception as e:
-            logger.error(f"백테스팅 실행 중 오류: {str(e)}")
+            logger.error(f"{log_prefix}백테스팅 실행 중 오류: {str(e)}")
     
     # 하나라도 처리되었으면 예약 필드 비우기
     if processed_any:
-        await clear_schedule_text(page_id)
-        logger.info(f"에이전트 '{agent_name}'의 모든 예약 처리 완료, 예약 필드 비움")
+        await clear_schedule_text(
+            page_id=page_id,
+            notion_api_manager=notion_api_manager
+        )
+        logger.info(f"{log_prefix}에이전트 '{agent_name}'의 모든 예약 처리 완료, 예약 필드 비움")
     else:
-        logger.info(f"에이전트 '{agent_name}'의 처리할 백테스팅 예약이 없거나 모두 실패했습니다.")
+        logger.info(f"{log_prefix}에이전트 '{agent_name}'의 처리할 백테스팅 예약이 없거나 모두 실패했습니다.")
 
-async def process_stock_recommendation(page_id: str, agent_name: str) -> None:
+async def process_stock_recommendation(
+    page_id: str, 
+    agent_name: str, 
+    worker_id: str = None,
+    notion_api_manager = None,
+    gemini_api_manager = None
+) -> None:
     """
     종목 추천 처리를 실행합니다.
     
     Args:
         page_id (str): 에이전트 페이지 ID
         agent_name (str): 에이전트 이름
+        worker_id (str): 워커 ID (병렬 처리용)
+        notion_api_manager: 노션 API 관리자 (선택 사항)
+        gemini_api_manager: Gemini API 관리자 (선택 사항)
     """
+    # 로그 접두어 (워커 ID가 있으면 포함)
+    log_prefix = f"[{worker_id}] " if worker_id else ""
+    
     try:
         # 에이전트 로드
         from investment_agent import InvestmentAgent
-        agent = await InvestmentAgent.load_from_notion(page_id)
+        
+        if notion_api_manager:
+            # API 관리자를 통해 로드 (커스텀 메서드 호출이 필요)
+            agent = await InvestmentAgent.load_from_notion_with_manager(
+                page_id, notion_api_manager)
+        else:
+            # 기존 방식
+            agent = await InvestmentAgent.load_from_notion(page_id)
         
         if not agent:
-            logger.error(f"에이전트를 찾을 수 없습니다: {page_id}")
+            logger.error(f"{log_prefix}에이전트를 찾을 수 없습니다: {page_id}")
             return
         
         # 현재 날짜
@@ -368,29 +506,36 @@ async def process_stock_recommendation(page_id: str, agent_name: str) -> None:
         # 최근 보고서 검색
         reports = await find_relevant_reports(
             agent=agent,
-            max_reports=10  # 최대 10개 보고서 가져오기
+            max_reports=10,  # 최대 10개 보고서 가져오기
+            worker_id=worker_id,
+            notion_api_manager=notion_api_manager,
+            gemini_api_manager=gemini_api_manager
         )
         
         if not reports:
-            logger.warning(f"에이전트 '{agent_name}'의 조건에 맞는 최근 보고서를 찾을 수 없습니다.")
+            logger.warning(f"{log_prefix}에이전트 '{agent_name}'의 조건에 맞는 최근 보고서를 찾을 수 없습니다.")
             return
         
         # 투자 기간은 기본 7일로 설정
         investment_period = 7
         
         # 보고서 분석 및 종목 추천
-        logger.info(f"에이전트 '{agent_name}'의 종목 추천 분석 시작 (보고서 {len(reports)}개 사용)")
+        logger.info(f"{log_prefix}에이전트 '{agent_name}'의 종목 추천 분석 시작 (보고서 {len(reports)}개 사용)")
+        
         recommendation_result = await analyze_reports_with_llm(
             reports=reports,
             agent=agent,
             max_stocks=5,
-            investment_period=investment_period
+            investment_period=investment_period,
+            worker_id=worker_id,
+            notion_api_manager=notion_api_manager,
+            gemini_api_manager=gemini_api_manager
         )
         
         # 추천 종목 수 확인
         recommended_stocks = recommendation_result.get("recommended_stocks", [])
         if not recommended_stocks:
-            logger.warning(f"에이전트 '{agent_name}'의 추천 종목이 없습니다.")
+            logger.warning(f"{log_prefix}에이전트 '{agent_name}'의 추천 종목이 없습니다.")
             return
         
         # 노션 DB에 추천 기록 저장
@@ -400,25 +545,37 @@ async def process_stock_recommendation(page_id: str, agent_name: str) -> None:
         title_prefix = f"{len(recommended_stocks)}종목추천"
         
         # 추천 기록 저장
-        await create_recommendation_record(
-            agent_page_id=page_id,
-            recommendations=recommendation_result,
-            investment_period=investment_period,
-            title_prefix=title_prefix  # 커스텀 제목 형식 전달
-        )
+        if notion_api_manager:
+            # API 관리자를 통해 저장 (커스텀 함수 필요)
+            await create_recommendation_record_with_manager(
+                agent_page_id=page_id,
+                recommendations=recommendation_result,
+                investment_period=investment_period,
+                title_prefix=title_prefix,  # 커스텀 제목 형식 전달
+                notion_api_manager=notion_api_manager
+            )
+        else:
+            # 기존 방식
+            await create_recommendation_record(
+                agent_page_id=page_id,
+                recommendations=recommendation_result,
+                investment_period=investment_period,
+                title_prefix=title_prefix  # 커스텀 제목 형식 전달
+            )
         
-        logger.info(f"에이전트 '{agent_name}'의 종목 추천 처리 완료: {len(recommended_stocks)}개 종목")
+        logger.info(f"{log_prefix}에이전트 '{agent_name}'의 종목 추천 처리 완료: {len(recommended_stocks)}개 종목")
         
     except Exception as e:
-        logger.error(f"종목 추천 처리 중 오류: {str(e)}")
+        logger.error(f"{log_prefix}종목 추천 처리 중 오류: {str(e)}")
         raise  # 상위 함수에서 처리할 수 있도록 예외 다시 발생
 
-async def clear_schedule_text(page_id: str) -> bool:
+async def clear_schedule_text(page_id: str, notion_api_manager=None) -> bool:
     """
     예약 필드를 완전히 비웁니다.
     
     Args:
         page_id (str): 에이전트 페이지 ID
+        notion_api_manager: 노션 API 관리자 (선택 사항)
         
     Returns:
         bool: 업데이트 성공 여부
@@ -432,7 +589,12 @@ async def clear_schedule_text(page_id: str) -> bool:
         }
         
         logger.info(f"예약 필드 비우기: 페이지 ID {page_id}")
-        return await update_notion_page(page_id, properties)
+        
+        # API 관리자 사용 여부에 따라 다른 방식으로 호출
+        if notion_api_manager:
+            return await notion_api_manager.update_notion_page(page_id, properties)
+        else:
+            return await update_notion_page(page_id, properties)
     
     except Exception as e:
         logger.error(f"예약 필드 비우기 중 오류: {str(e)}")
@@ -441,9 +603,12 @@ async def clear_schedule_text(page_id: str) -> bool:
 async def check_backtest_schedules() -> None:
     """
     Notion DB에서 백테스팅 예약이 있거나 종목 추천이 활성화된 에이전트를 확인하고 처리합니다.
+    (병렬 처리 시스템으로 대체되어 더 이상 직접 호출되지 않음)
     """
     try:
         logger.info("백테스팅 예약 및 종목 추천 확인 시작")
+        
+        from notion_utils import query_notion_database
         
         # 에이전트 DB 쿼리
         agents = await query_notion_database(NOTION_AGENT_DB_ID)
@@ -458,7 +623,14 @@ async def check_backtest_schedules() -> None:
         logger.error(f"백테스팅 예약 및 종목 추천 확인 중 오류: {str(e)}")
 
 # 스케줄러 인스턴스 생성 - BackgroundScheduler 사용
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(
+    daemon=False,  # 데몬 모드 비활성화 - 중요한 수정
+    job_defaults={
+        'misfire_grace_time': 120,  # 작업 지연 허용 시간 증가(초)
+        'coalesce': True,           # 누락된 작업 하나로 통합
+        'max_instances': 1          # 동일 작업의 최대 인스턴스 수 제한
+    }
+)
 
 def start_scheduler():
     """백테스팅 스케줄러를 시작합니다."""
@@ -468,13 +640,14 @@ def start_scheduler():
     # 1시부터 7시까지 제외하는 시간 제한 설정
     hour_restriction = "8-23,0"  # 8시부터 23시까지, 그리고 0시
     
-    # 10분부터 55분까지 5분 단위로 스케줄 추가
+    # 10분부터 55분까지 5분 단위로 스케줄 추가 - 작업 ID 변경
     scheduler.add_job(
         run_backtest_scheduler,
         'cron',
         hour=hour_restriction,
         minute='10,15,20,25,30,35,40,45,50,55',
-        id='backtest_scheduler_5min'
+        id='backtest_scheduler_main',  # 작업 ID 변경
+        replace_existing=True          # 기존 작업 대체
     )
     
     # 스케줄러 시작
@@ -484,3 +657,67 @@ def start_scheduler():
     # 스케줄러 활성화 상태 확인을 위해 즉시 한 번 실행
     logger.info("스케줄러 상태 확인을 위한 즉시 실행")
     run_backtest_scheduler()
+# 아래는 API 관리자를 통한 함수 호출을 위한 래퍼 함수들
+
+async def create_recommendation_record_with_manager(
+    agent_page_id: str, 
+    recommendations: Dict[str, Any], 
+    investment_period: int, 
+    title_prefix: str = None,
+    notion_api_manager = None
+) -> bool:
+    """
+    API 관리자를 통해 추천 기록을 생성합니다.
+    """
+    from notion_utils import create_recommendation_record
+    from datetime import timedelta
+    
+    try:
+        # 추천 종목 및 비중
+        stock_names = []
+        if "recommended_stocks" in recommendations:
+            for stock in recommendations["recommended_stocks"]:
+                if "name" in stock and stock["name"]:
+                    stock_names.append(stock["name"])
+                    
+        # 현재 날짜 및 예상 종료일
+        current_date = datetime.now()
+        end_date = current_date + timedelta(days=investment_period)
+        
+        # 투자 비중 텍스트
+        weights = "균등 비중"  # 기본값
+        
+        # 제목 설정 (종목추천 형식 또는 기본 형식)
+        if title_prefix:
+            # 타이틀에 공백이 있는지 확인하고 적절하게 처리
+            title = f"{title_prefix} {current_date.strftime('%Y-%m-%d')}"
+        else:
+            num_stocks = len(stock_names) if stock_names else 0
+            title = f"{num_stocks}종목추천 {current_date.strftime('%Y-%m-%d')}"
+        
+        logger.info(f"저장할 추천 기록 제목: {title}")
+        
+        # 추천 기록 생성
+        recommendation_data = {
+            "title": title,
+            "agent_page_id": agent_page_id,
+            "start_date": current_date,
+            "end_date": end_date,
+            "stocks": stock_names,
+            "weights": weights,
+            "recommendation_type": "신규 추천"  # 새로운 필드 추가
+        }
+        
+        # 이 부분이 API 관리자를 사용하도록 수정 필요 - 별도 구현 필요
+        # 현재는 기존 함수를 호출
+        # 수정 전: return await create_recommendation_record(recommendation_data)
+        # 수정 후:
+        return await create_recommendation_record(
+            agent_page_id=agent_page_id,
+            recommendations=recommendations,  # 이 인자 추가
+            investment_period=investment_period  # 이 인자 추가
+        )
+        
+    except Exception as e:
+        logger.error(f"추천 기록 저장 중 오류: {str(e)}")
+        return False

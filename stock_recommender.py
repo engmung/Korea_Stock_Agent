@@ -83,6 +83,8 @@ class GeminiClient:
         # genai.configure() 사용 안 함
         self.client = genai.Client(api_key=self.api_key)
         self.model_name = "gemini-2.5-flash-preview-04-17"
+        # gemini-2.5-pro-preview-03-25
+        # gemini-2.5-flash-preview-04-17
     
     async def analyze_with_agent_prompt(self, system_prompt: str, analysis_data: str) -> str:
         """에이전트 프롬프트로 종목 분석 수행"""
@@ -265,32 +267,55 @@ async def recommend_stocks(
     agent, 
     analyzed_reports: Dict[str, Any],
     max_stocks: int = 5,
-    investment_period: int = 7
+    investment_period: int = 7,
+    worker_id: str = None,
+    gemini_api_manager = None
 ) -> Dict[str, Any]:
     """
     두 단계 프로세스로 종목 추천:
     1. 분석 LLM: 투자 에이전트 프롬프트로 분석
     2. 파싱 LLM: 결과를 구조화된 JSON으로 변환
+    
+    Args:
+        agent: 투자 에이전트 객체
+        analyzed_reports: 분석된 보고서 데이터
+        max_stocks: 추천할 최대 종목 수
+        investment_period: 투자 기간 (일)
+        worker_id: 워커 ID (병렬 처리용)
+        gemini_api_manager: Gemini API 관리자 (선택 사항)
+        
+    Returns:
+        추천 종목 정보 딕셔너리
     """
+    # 로그 접두어 (워커 ID가 있으면 포함)
+    log_prefix = f"[{worker_id}] " if worker_id else ""
+    
     try:
-        if not GEMINI_API_KEY:
-            logger.error("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.")
+        # API 키 확인 - worker_id가 있고 gemini_api_manager가 제공된 경우 사용
+        api_key = None
+        if gemini_api_manager and worker_id:
+            api_key = await gemini_api_manager.get_api_key(worker_id)
+        else:
+            api_key = GEMINI_API_KEY
+            
+        if not api_key:
+            logger.error(f"{log_prefix}GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.")
             return {"error": "GEMINI_API_KEY not set"}
         
         # 보고서 데이터 검증
         if not analyzed_reports or "reports" not in analyzed_reports:
-            logger.warning("분석된 보고서 데이터가 없습니다.")
+            logger.warning(f"{log_prefix}분석된 보고서 데이터가 없습니다.")
             return {"error": "No report data available"}
         
         # 노션에서 에이전트 프롬프트 가져오기
         from report_selector import get_agent_prompt
         agent_prompt = await get_agent_prompt(agent.page_id)
         if not agent_prompt:
-            logger.error(f"에이전트 {agent.agent_name}의 프롬프트를 찾을 수 없습니다.")
+            logger.error(f"{log_prefix}에이전트 {agent.agent_name}의 프롬프트를 찾을 수 없습니다.")
             # 기본 프롬프트 사용
             agent_prompt = f"""당신은 투자 전문가입니다. 주어진 데이터를 분석하여 최적의 투자 종목을 추천해주세요.
             {agent.agent_name} 에이전트로서, 각 종목에 대한 분석 및 추천 이유를 자세히 설명해주세요."""
-            logger.info("기본 프롬프트로 대체합니다.")
+            logger.info(f"{log_prefix}기본 프롬프트로 대체합니다.")
         
         # 투자 기간 텍스트 변환
         investment_period_text = f"{investment_period}일"
@@ -310,8 +335,13 @@ async def recommend_stocks(
             
             # 보고서 내용 가져오기
             if "id" in report:
-                from notion_utils import get_notion_page_content
-                content = await get_notion_page_content(report["id"])
+                # API 관리자 사용 여부에 따라 다른 방식으로 호출
+                if gemini_api_manager and worker_id and "notion_api_manager" in globals():
+                    from notion_utils import get_notion_page_content_with_manager
+                    content = await get_notion_page_content_with_manager(report["id"], notion_api_manager)
+                else:
+                    from notion_utils import get_notion_page_content
+                    content = await get_notion_page_content(report["id"])
                 reports_content += f"내용:\n{content}\n\n"
         
         # 분석 프롬프트 생성
@@ -337,17 +367,20 @@ async def recommend_stocks(
 전체 포트폴리오 구성 논리도 함께 제시해주세요.
 """
         
-        # Gemini 클라이언트 생성
-        gemini_client = GeminiClient()
+        # Gemini 클라이언트 생성 - API 관리자 사용 여부에 따라 방식 결정
+        if gemini_api_manager and worker_id:
+            gemini_client = GeminiClient(api_key=api_key)
+        else:
+            gemini_client = GeminiClient()
         
         # 1단계: 분석 수행
-        logger.info(f"에이전트 '{agent.agent_name}'의 프롬프트로 분석 시작...")
+        logger.info(f"{log_prefix}에이전트 '{agent.agent_name}'의 프롬프트로 분석 시작...")
         analysis_result = await gemini_client.analyze_with_agent_prompt(
             system_prompt="당신은 투자 분석 및 추천 전문가입니다. 투자 에이전트의 철학에 맞는 최적의 종목을 추천해주세요.",
             analysis_data=analysis_prompt
         )
         
-        logger.info("분석 완료, 결과 파싱 시작...")
+        logger.info(f"{log_prefix}분석 완료, 결과 파싱 시작...")
         
         # 2단계: 분석 결과 파싱
         parsing_prompt = """
@@ -389,7 +422,12 @@ async def recommend_stocks(
         # 추천된 종목이 있는 경우 종목 코드 검색
         if "recommended_stocks" in parsed_recommendation:
             from stock_searcher import StockSearcher
-            stock_searcher = StockSearcher(api_key=GEMINI_API_KEY)
+            
+            # API 관리자 사용 여부에 따라 방식 결정
+            if gemini_api_manager and worker_id:
+                stock_searcher = StockSearcher(api_key=api_key)
+            else:
+                stock_searcher = StockSearcher(api_key=GEMINI_API_KEY)
             
             for stock in parsed_recommendation["recommended_stocks"]:
                 stock_name = stock.get("name", "")
@@ -417,21 +455,21 @@ async def recommend_stocks(
                             if not matches.empty:
                                 ticker = matches.iloc[0]['Symbol']
                                 stock_name_exact = matches.iloc[0]['Name']
-                                logger.info(f"KRX 검색으로 종목 '{stock_name}'에 대한 코드 '{ticker}' 찾음")
+                                logger.info(f"{log_prefix}KRX 검색으로 종목 '{stock_name}'에 대한 코드 '{ticker}' 찾음")
                                 stock_tickers[ticker] = stock_name_exact
                                 stock["ticker"] = ticker
                                 stock["name"] = stock_name_exact  # 정확한 종목명으로 업데이트
                         except Exception as e:
-                            logger.info(f"KRX 검색 중 오류, 건너뜀: {str(e)}")
+                            logger.info(f"{log_prefix}KRX 검색 중 오류, 건너뜀: {str(e)}")
         
         # 백테스팅에서 활용할 수 있도록 티커->종목명 매핑도 함께 저장
         parsed_recommendation["stock_tickers"] = stock_tickers
         
-        logger.info(f"종목 추천 완료: {len(parsed_recommendation.get('recommended_stocks', []))}개 종목")
+        logger.info(f"{log_prefix}종목 추천 완료: {len(parsed_recommendation.get('recommended_stocks', []))}개 종목")
         return parsed_recommendation
         
     except Exception as e:
-        logger.error(f"종목 추천 중 오류: {str(e)}")
+        logger.error(f"{log_prefix if 'log_prefix' in locals() else ''}종목 추천 중 오류: {str(e)}")
         return {"error": str(e)}
 
 def extract_json_from_text(text: str) -> str:

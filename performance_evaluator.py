@@ -49,12 +49,32 @@ async def backtest_recommendation(
     investment_period: int = 7,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    investment_amount: float = 1000000
+    investment_amount: float = 1000000,
+    worker_id: str = None,
+    notion_api_manager = None,
+    gemini_api_manager = None
 ) -> Dict[str, Any]:
     """
     추천 종목에 대한 백테스팅을 수행합니다.
+    
+    Args:
+        page_id: 에이전트 페이지 ID
+        recommendations: 추천 종목 정보 (없으면 새로 생성)
+        investment_period: 투자 기간(일)
+        start_date: 백테스팅 시작일 (없으면 오늘 - investment_period)
+        end_date: 백테스팅 종료일 (없으면 오늘)
+        investment_amount: 투자 금액
+        worker_id: 워커 ID (병렬 처리용)
+        notion_api_manager: 노션 API 관리자 (선택 사항)
+        gemini_api_manager: Gemini API 관리자 (선택 사항)
+        
+    Returns:
+        백테스팅 결과
     """
     try:
+        # 로그 접두어 (워커 ID가 있으면 포함)
+        log_prefix = f"[{worker_id}] " if worker_id else ""
+        
         # 날짜 설정
         if not end_date:
             end_date = datetime.now().strftime("%Y-%m-%d")
@@ -62,14 +82,19 @@ async def backtest_recommendation(
         if not start_date:
             start_date = (datetime.now() - timedelta(days=investment_period)).strftime("%Y-%m-%d")
         
-        logger.info(f"백테스팅 시작: 기간 {start_date} ~ {end_date}")
+        logger.info(f"{log_prefix}백테스팅 시작: 기간 {start_date} ~ {end_date}")
         
         # 에이전트 로드
         from investment_agent import InvestmentAgent
-        agent = await InvestmentAgent.load_from_notion(page_id)
+        
+        # API 관리자 사용 여부에 따라 다른 방식으로 에이전트 로드
+        if notion_api_manager:
+            agent = await InvestmentAgent.load_from_notion_with_manager(page_id, notion_api_manager)
+        else:
+            agent = await InvestmentAgent.load_from_notion(page_id)
         
         if not agent:
-            logger.error(f"에이전트를 찾을 수 없습니다: {page_id}")
+            logger.error(f"{log_prefix}에이전트를 찾을 수 없습니다: {page_id}")
             return {
                 "status": "error", 
                 "message": f"에이전트를 찾을 수 없습니다: {page_id}"
@@ -94,30 +119,55 @@ async def backtest_recommendation(
                 agent=agent,
                 backtest_date=start_date,
                 max_reports=40,
-                debug_info=debug_info
+                debug_info=debug_info,
+                worker_id=worker_id,
+                notion_api_manager=notion_api_manager,
+                gemini_api_manager=gemini_api_manager
             )
             
             if not reports:
-                logger.info(f"백테스팅 날짜 {start_date} 이전에 관련 보고서가 없습니다.")
+                logger.info(f"{log_prefix}백테스팅 날짜 {start_date} 이전에 관련 보고서가 없습니다.")
                 return {
                     "status": "warning",
                     "message": f"백테스팅 날짜 {start_date} 이전에 관련 보고서가 없습니다."
                 }
             
             # 보고서 분석
-            analyzed_reports = await analyze_reports(reports)
+            if gemini_api_manager and worker_id:
+                # API 관리자 사용
+                analyzed_reports = await analyze_reports(
+                    reports,
+                    worker_id=worker_id,
+                    notion_api_manager=notion_api_manager,
+                    gemini_api_manager=gemini_api_manager
+                )
+            else:
+                # 기존 방식
+                analyzed_reports = await analyze_reports(reports)
             
             # Gemini를 사용한 종목 추천
-            recommendations = await recommend_stocks(
-                agent=agent,
-                analyzed_reports=analyzed_reports,
-                max_stocks=5,
-                investment_period=investment_period
-            )
+            if gemini_api_manager and worker_id:
+                # API 관리자 사용
+                recommendations = await recommend_stocks(
+                    agent=agent,
+                    analyzed_reports=analyzed_reports,
+                    max_stocks=5,
+                    investment_period=investment_period,
+                    worker_id=worker_id,
+                    gemini_api_manager=gemini_api_manager
+                )
+            else:
+                # 기존 방식
+                recommendations = await recommend_stocks(
+                    agent=agent,
+                    analyzed_reports=analyzed_reports,
+                    max_stocks=5,
+                    investment_period=investment_period
+                )
         
         # 추천 종목 리스트 추출
         if not recommendations or "recommended_stocks" not in recommendations:
-            logger.error("올바른 추천 데이터가 제공되지 않았습니다.")
+            logger.error(f"{log_prefix}올바른 추천 데이터가 제공되지 않았습니다.")
             return {
                 "status": "error",
                 "message": "추천 종목 데이터가 없습니다."
@@ -126,7 +176,7 @@ async def backtest_recommendation(
         stocks = recommendations["recommended_stocks"]
         
         if not stocks:
-            logger.info("추천 종목이 없습니다.")
+            logger.info(f"{log_prefix}추천 종목이 없습니다.")
             return {
                 "status": "warning",
                 "message": "추천 종목이 없습니다."
@@ -139,17 +189,25 @@ async def backtest_recommendation(
                 stock_names.append(stock.get("name"))
         
         if not stock_names:
-            logger.error("유효한 종목명이 없습니다.")
+            logger.error(f"{log_prefix}유효한 종목명이 없습니다.")
             return {
                 "status": "error",
                 "message": "유효한 종목명이 없습니다."
             }
         
-        logger.info(f"백테스팅할 종목명: {', '.join(stock_names)}")
+        logger.info(f"{log_prefix}백테스팅할 종목명: {', '.join(stock_names)}")
         
-        # 종목명을 종목코드로 변환 - Gemini의 Google Search 기능 활용
+        # 종목명을 종목코드로 변환
         from stock_searcher import StockSearcher
-        stock_searcher = StockSearcher(api_key=GEMINI_API_KEY)
+        
+        # API 관리자 사용 여부에 따라 검색 방식 결정
+        if gemini_api_manager and worker_id:
+            # API 관리자로부터 API 키 가져오기
+            api_key = await gemini_api_manager.get_api_key(worker_id)
+            stock_searcher = StockSearcher(api_key=api_key)
+        else:
+            # 기존 방식
+            stock_searcher = StockSearcher(api_key=os.environ.get("GEMINI_API_KEY"))
         
         # 디버깅 정보 업데이트
         debug_info["recommendations"] = recommendations
@@ -192,12 +250,12 @@ async def backtest_recommendation(
             
             if ticker_match:
                 ticker = ticker_match.group(1)
-                logger.info(f"종목 '{stock_name}'에 대한 코드 '{ticker}' 찾음")
+                logger.info(f"{log_prefix}종목 '{stock_name}'에 대한 코드 '{ticker}' 찾음")
                 all_ticker_symbols.append(ticker)
                 stock_name_to_ticker[stock_name] = ticker
                 stock_ticker_mapping[ticker] = stock_name
             else:
-                logger.info(f"종목 '{stock_name}'에 대한 코드를 찾을 수 없음, KRX 검색 시도")
+                logger.info(f"{log_prefix}종목 '{stock_name}'에 대한 코드를 찾을 수 없음, KRX 검색 시도")
                 
                 # KRX 직접 검색 시도
                 try:
@@ -207,12 +265,12 @@ async def backtest_recommendation(
                     if not matches.empty:
                         ticker = matches.iloc[0]['Symbol']
                         exact_name = matches.iloc[0]['Name']
-                        logger.info(f"KRX 검색으로 종목 '{stock_name}'에 대한 코드 '{ticker}' 찾음")
+                        logger.info(f"{log_prefix}KRX 검색으로 종목 '{stock_name}'에 대한 코드 '{ticker}' 찾음")
                         all_ticker_symbols.append(ticker)
                         stock_name_to_ticker[stock_name] = ticker
                         stock_ticker_mapping[ticker] = exact_name
                 except Exception as e:
-                    logger.info(f"KRX 검색 중 오류, 건너뜀: {str(e)}")
+                    logger.info(f"{log_prefix}KRX 검색 중 오류, 건너뜀: {str(e)}")
         
         # 디버깅 정보 추가
         debug_info["stock_search_results"] = stock_search_results
@@ -221,7 +279,7 @@ async def backtest_recommendation(
         
         # 검색 결과가 없으면 오류 반환
         if not all_ticker_symbols:
-            logger.error("유효한 종목 코드를 하나도 찾을 수 없습니다.")
+            logger.error(f"{log_prefix}유효한 종목 코드를 하나도 찾을 수 없습니다.")
             return {
                 "status": "error",
                 "message": "유효한 종목 코드를 하나도 찾을 수 없습니다.",
@@ -230,7 +288,7 @@ async def backtest_recommendation(
         
         # 중복 제거
         all_ticker_symbols = list(set(all_ticker_symbols))
-        logger.info(f"최종 백테스팅 종목 코드: {', '.join(all_ticker_symbols)}")
+        logger.info(f"{log_prefix}최종 백테스팅 종목 코드: {', '.join(all_ticker_symbols)}")
         
         # 포트폴리오 백테스팅 실행
         backtest_result = await run_portfolio_backtest(
@@ -245,7 +303,7 @@ async def backtest_recommendation(
         debug_info["backtest_result"] = backtest_result
         
         if backtest_result.get("status") != "success":
-            logger.error(f"백테스팅 실패: {backtest_result.get('error')}")
+            logger.error(f"{log_prefix}백테스팅 실패: {backtest_result.get('error')}")
             return {
                 "status": "error",
                 "message": f"백테스팅 중 오류가 발생했습니다: {backtest_result.get('error')}",
@@ -259,16 +317,60 @@ async def backtest_recommendation(
         debug_info["performance_metrics"] = performance_metrics
         
         # 투자 실적 기록 (Notion DB에 저장) - 디버깅 정보 포함
-        await save_performance_record(
-            agent_page_id=page_id,
-            recommendations=recommendations,
-            backtest_result=backtest_result,
-            performance_metrics=performance_metrics,
-            start_date=start_date,
-            end_date=end_date,
-            debug_info=debug_info
-        )
-        
+        if notion_api_manager:
+            # API 관리자 사용
+            try:
+                # 추천 종목 및 비중
+                stock_names = []
+                if "recommended_stocks" in recommendations:
+                    for stock in recommendations["recommended_stocks"]:
+                        if "name" in stock and stock["name"]:
+                            stock_names.append(stock["name"])
+                
+                # 투자 비중 텍스트
+                weights = "균등 비중"  # 기본값
+                
+                # 총 수익률 (백테스팅 결과에서 가져오기)
+                portfolio_return = performance_metrics.get("portfolio_return", 0)
+                
+                # 페이지 타이틀 형식 변경 - 총수익률(종목수)
+                page_title = f"{portfolio_return:.1f}%({len(stock_names)}종목)"
+                
+                # 성과 기록 생성
+                performance_data = {
+                    "title": page_title,
+                    "agent_page_id": page_id,
+                    "start_date": datetime.fromisoformat(start_date.replace('Z', '+00:00')) if isinstance(start_date, str) else start_date,
+                    "end_date": datetime.fromisoformat(end_date.replace('Z', '+00:00')) if isinstance(end_date, str) else end_date,
+                    "stocks": stock_names,
+                    "weights": weights,
+                    "total_return": portfolio_return,
+                    "max_drawdown": performance_metrics.get("avg_max_drawdown", 0),
+                    "evaluation": performance_metrics.get("evaluation", "부분 성공"),
+                    "debug_info": debug_info  # 디버깅 정보 전달
+                }
+                
+                # 노션 DB에 저장 - API 관리자를 통해 직접 호출
+                from notion_utils import create_investment_performance
+                
+                result = await create_investment_performance(performance_data)
+                
+                if not result or "id" not in result:
+                    logger.warning(f"{log_prefix}성과 기록 저장에 실패했습니다.")
+            
+            except Exception as e:
+                logger.error(f"{log_prefix}성과 기록 저장 중 오류: {str(e)}")
+        else:
+            # 기존 방식
+            await save_performance_record(
+                agent_page_id=page_id,
+                recommendations=recommendations,
+                backtest_result=backtest_result,
+                performance_metrics=performance_metrics,
+                start_date=start_date,
+                end_date=end_date,
+                debug_info=debug_info
+            )
         return {
             "status": "success",
             "agent_page_id": page_id,
@@ -280,7 +382,7 @@ async def backtest_recommendation(
         }
     
     except Exception as e:
-        logger.error(f"성과 평가 중 오류: {str(e)}")
+        logger.error(f"{log_prefix if 'log_prefix' in locals() else ''}성과 평가 중 오류: {str(e)}")
         return {
             "status": "error",
             "message": f"성과 평가 중 오류가 발생했습니다: {str(e)}"

@@ -26,7 +26,9 @@ async def select_reports_by_agent_preference(
     agent, 
     candidate_reports_metadata: List[Dict[str, Any]], 
     backtest_date: str,
-    debug_info: Dict[str, Any] = None
+    debug_info: Dict[str, Any] = None,
+    worker_id: str = None,
+    gemini_api_manager = None
 ) -> Dict[str, Any]:
     """
     에이전트의 선호도에 맞게 보고서를 선택합니다.
@@ -36,13 +38,25 @@ async def select_reports_by_agent_preference(
         candidate_reports_metadata: 선택 대상 보고서 메타데이터 목록
         backtest_date: 백테스팅 시작일
         debug_info: 디버깅 정보 저장용 딕셔너리
+        worker_id: 워커 ID (병렬 처리용)
+        gemini_api_manager: Gemini API 관리자 (선택 사항)
         
     Returns:
         선택된 보고서 ID 목록 및 선택 이유를 포함한 딕셔너리
     """
+    # 로그 접두어 (워커 ID가 있으면 포함)
+    log_prefix = f"[{worker_id}] " if worker_id else ""
+    
     try:
-        if not GEMINI_API_KEY:
-            logger.warning("GEMINI_API_KEY가 설정되지 않았습니다. 기본 보고서 선택 방식을 사용합니다.")
+        # Gemini API 키 확인
+        api_key = None
+        if gemini_api_manager and worker_id:
+            api_key = await gemini_api_manager.get_api_key(worker_id)
+        else:
+            api_key = GEMINI_API_KEY
+            
+        if not api_key:
+            logger.warning(f"{log_prefix}Gemini API 키가 설정되지 않았습니다. 기본 보고서 선택 방식을 사용합니다.")
             return {
                 "selected_report_ids": [report["page_id"] for report in candidate_reports_metadata[:10]],
                 "selection_info": {
@@ -54,7 +68,7 @@ async def select_reports_by_agent_preference(
         # 에이전트 프롬프트 가져오기
         agent_prompt = await get_agent_prompt(agent.page_id)
         if not agent_prompt:
-            logger.warning(f"에이전트 '{agent.agent_name}'의 프롬프트를 찾을 수 없습니다. 기본 선택 방식을 사용합니다.")
+            logger.warning(f"{log_prefix}에이전트 '{agent.agent_name}'의 프롬프트를 찾을 수 없습니다. 기본 선택 방식을 사용합니다.")
             return {
                 "selected_report_ids": [report["page_id"] for report in candidate_reports_metadata[:10]],
                 "selection_info": {
@@ -114,7 +128,16 @@ async def select_reports_by_agent_preference(
         """
         
         # Gemini API 호출
-        response_text = await call_gemini_api(selection_prompt)
+        if gemini_api_manager and worker_id:
+            # API 관리자 사용
+            response_text = await call_gemini_api_with_manager(
+                prompt=selection_prompt,
+                worker_id=worker_id,
+                gemini_api_manager=gemini_api_manager
+            )
+        else:
+            # 기존 방식
+            response_text = await call_gemini_api(selection_prompt)
         
         # 응답 파싱
         selection_result = parse_selection_response(response_text)
@@ -151,7 +174,7 @@ async def select_reports_by_agent_preference(
         
         # 기본값 처리: 선택된 보고서가 없으면 기본 10개 반환
         if not selected_report_ids:
-            logger.warning(f"선택된 보고서가 없습니다. 기본 10개 보고서를 사용합니다.")
+            logger.warning(f"{log_prefix}선택된 보고서가 없습니다. 기본 10개 보고서를 사용합니다.")
             selected_report_ids = [report["page_id"] for report in candidate_reports_metadata[:min(10, len(candidate_reports_metadata))]]
             selection_details = [{
                 "id": report["page_id"], 
@@ -167,10 +190,10 @@ async def select_reports_by_agent_preference(
             
         # 선택된 보고서 로깅 - 더 상세한 정보 표시
         for detail in selection_details[:5]:  # 처음 5개만 로깅
-            logger.info(f"선택된 보고서: '{detail['title']}' ({detail['channel']}, {detail['date']})")
+            logger.info(f"{log_prefix}선택된 보고서: '{detail['title']}' ({detail['channel']}, {detail['date']})")
         
         if len(selection_details) > 5:
-            logger.info(f"그 외 {len(selection_details) - 5}개 보고서 선택됨")
+            logger.info(f"{log_prefix}그 외 {len(selection_details) - 5}개 보고서 선택됨")
         
         return {
             "selected_report_ids": selected_report_ids,
@@ -181,7 +204,7 @@ async def select_reports_by_agent_preference(
         }
         
     except Exception as e:
-        logger.error(f"보고서 선택 중 오류 발생: {str(e)}")
+        logger.error(f"{log_prefix}보고서 선택 중 오류 발생: {str(e)}")
         # 오류 발생 시 기본 10개 반환
         default_count = min(10, len(candidate_reports_metadata))
         return {
@@ -197,6 +220,62 @@ async def select_reports_by_agent_preference(
                 } for report in candidate_reports_metadata[:default_count]]
             }
         }
+
+async def call_gemini_api_with_manager(prompt: str, worker_id: str, gemini_api_manager) -> str:
+    """
+    API 관리자를 통해 Gemini API를 호출합니다.
+    
+    Args:
+        prompt: 프롬프트 텍스트
+        worker_id: 워커 ID
+        gemini_api_manager: Gemini API 관리자
+        
+    Returns:
+        API 응답 텍스트
+    """
+    try:
+        # API 관리자에서 클라이언트 가져오기
+        client = await gemini_api_manager.get_client(worker_id)
+        if not client:
+            raise ValueError("Gemini API 클라이언트를 생성할 수 없습니다.")
+        
+        model = "gemini-2.5-flash-preview-04-17"  # 최신 모델 사용
+        
+        # 요청 구성
+        contents = [
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=prompt)]
+            )
+        ]
+        
+        # 시스템 지시사항
+        system_instruction = """
+        당신은 투자 데이터 선별 전문가입니다. 투자 에이전트의 특성과 전략에 가장 적합한 보고서를 선택하는 임무를 맡았습니다.
+        요청받은 형식과 지침을 정확히 따라 JSON 형식으로 응답해주세요.
+        응답은 반드시 JSON 파싱이 가능해야 합니다.
+        특별히 에이전트가 선호하는 특정 전문가, 채널, 투자 스타일 등을 분석하여 보고서를 선택하세요.
+        """
+        
+        generate_content_config = types.GenerateContentConfig(
+            temperature=0.2,  # 낮은 온도로 일관성 확보
+            response_mime_type="text/plain",
+            system_instruction=[types.Part.from_text(text=system_instruction)]
+        )
+        
+        # 비동기 처리를 위한 루프
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=model,
+            contents=contents,
+            config=generate_content_config
+        )
+        
+        return response.text
+        
+    except Exception as e:
+        logger.error(f"Gemini API 호출 중 오류: {str(e)}")
+        return f"{{\"error\": \"{str(e)}\"}}"
 
 async def get_agent_prompt(page_id: str) -> Optional[str]:
     """
