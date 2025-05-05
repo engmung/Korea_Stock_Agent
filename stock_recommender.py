@@ -85,9 +85,9 @@ class GeminiClient:
     async def analyze_with_agent_prompt(self, system_prompt: str, analysis_data: str) -> str:
         """에이전트 프롬프트로 종목 분석 수행"""
         generation_config = {
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "top_k": 64,
+            "temperature": 0,
+            "top_p": 0.1,
+            "top_k": 20,
             "max_output_tokens": 65536,
             "response_mime_type": "text/plain",
         }

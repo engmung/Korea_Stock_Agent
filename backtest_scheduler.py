@@ -123,12 +123,16 @@ async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
     예약 문자열에서 날짜 범위를 파싱합니다.
     줄바꿈 또는 쉼표로 구분된 형식 지원:
     
+    지원하는 형식:
+    - MMDD~MMDD (기본 형식, 현재 연도 사용)
+    - YYMMDD~YYMMDD (연도 포함 형식)
+    
     형식 1 (줄바꿈):
     0522~0526
-    0601~0605
+    240601~240605
     
     형식 2 (쉼표):
-    0522~0526, 0601~0605
+    0522~0526, 0601~0605, 240701~240705
     
     Returns:
         List[Dict[str, str]]: 시작일과 종료일 딕셔너리 리스트
@@ -160,29 +164,31 @@ async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
     logger.info(f"분석된 예약 항목: {items}")
     
     current_year = datetime.now().year
+    current_year_short = current_year % 100  # 현재 연도의 마지막 두 자리
     
     for item in items:
-        # 날짜 범위 파싱 (형식: MMDD~MMDD)
-        match = re.match(r'(\d{4})~(\d{4})', item)
+        # 날짜 범위 파싱 - 연도 포함 형식(YYMMDD~YYMMDD)과 기본 형식(MMDD~MMDD) 모두 지원
+        match_with_year = re.match(r'(\d{6})~(\d{6})', item)
+        match_without_year = re.match(r'(\d{4})~(\d{4})', item)
         
-        if match:
-            start_mmdd, end_mmdd = match.groups()
+        if match_with_year:
+            # YYMMDD~YYMMDD 형식 처리
+            start_yymmdd, end_yymmdd = match_with_year.groups()
             
-            # MMDD 형식을 YYYY-MM-DD 형식으로 변환
             try:
-                start_mm, start_dd = int(start_mmdd[:2]), int(start_mmdd[2:])
-                end_mm, end_dd = int(end_mmdd[:2]), int(end_mmdd[2:])
+                # 연도, 월, 일 분리
+                start_yy, start_mm, start_dd = int(start_yymmdd[:2]), int(start_yymmdd[2:4]), int(start_yymmdd[4:])
+                end_yy, end_mm, end_dd = int(end_yymmdd[:2]), int(end_yymmdd[2:4]), int(end_yymmdd[4:])
+                
+                # 2000년대 연도로 변환 (20YY)
+                start_year = 2000 + start_yy
+                end_year = 2000 + end_yy
                 
                 # 날짜 유효성 검증 및 변환
-                start_date = f"{current_year}-{start_mm:02d}-{start_dd:02d}"
-                end_date = f"{current_year}-{end_mm:02d}-{end_dd:02d}"
+                start_date = f"{start_year}-{start_mm:02d}-{start_dd:02d}"
+                end_date = f"{end_year}-{end_mm:02d}-{end_dd:02d}"
                 
-                # 시작일이 종료일보다 나중인 경우 처리
-                if start_date > end_date:
-                    # 종료일이 다음 해로 넘어간 경우
-                    end_date = f"{current_year + 1}-{end_mm:02d}-{end_dd:02d}"
-                
-                logger.info(f"백테스팅 일정 추가: {start_date} ~ {end_date} (원본: {item})")
+                logger.info(f"백테스팅 일정 추가(연도 포함): {start_date} ~ {end_date} (원본: {item})")
                 
                 date_ranges.append({
                     "start_date": start_date,
@@ -190,7 +196,37 @@ async def parse_date_ranges(schedule_text: str) -> List[Dict[str, str]]:
                     "original_text": item
                 })
             except ValueError as e:
-                logger.error(f"유효하지 않은 날짜 형식: {item} - {str(e)}")
+                logger.error(f"유효하지 않은 날짜 형식(연도 포함): {item} - {str(e)}")
+                
+        elif match_without_year:
+            # MMDD~MMDD 형식 처리 (기존 로직)
+            start_mmdd, end_mmdd = match_without_year.groups()
+            
+            try:
+                start_mm, start_dd = int(start_mmdd[:2]), int(start_mmdd[2:])
+                end_mm, end_dd = int(end_mmdd[:2]), int(end_mmdd[2:])
+                
+                # 현재 연도 사용
+                start_year = end_year = current_year
+                
+                # 날짜 유효성 검증 및 변환
+                start_date = f"{start_year}-{start_mm:02d}-{start_dd:02d}"
+                end_date = f"{end_year}-{end_mm:02d}-{end_dd:02d}"
+                
+                # 시작일이 종료일보다 나중인 경우 처리
+                if start_date > end_date:
+                    # 종료일이 다음 해로 넘어간 경우
+                    end_date = f"{current_year + 1}-{end_mm:02d}-{end_dd:02d}"
+                
+                logger.info(f"백테스팅 일정 추가(기본): {start_date} ~ {end_date} (원본: {item})")
+                
+                date_ranges.append({
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "original_text": item
+                })
+            except ValueError as e:
+                logger.error(f"유효하지 않은 날짜 형식(기본): {item} - {str(e)}")
         else:
             logger.warning(f"잘못된 형식의 예약 항목 건너뜀: {item}")
     

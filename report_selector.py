@@ -110,7 +110,7 @@ async def select_reports_by_agent_preference(
         {json.dumps(formatted_reports, indent=2, ensure_ascii=False)}
 
         ## 요청
-        위 투자 에이전트에게 가장 적합한 보고서 5-15개를 선택해주세요.
+        위 투자 에이전트에게 가장 적합한 보고서들을을 선택해주세요.
         백테스팅 시작일({backtest_date})을 고려해주세요.
 
         응답은 다음 JSON 형식으로 제공해주세요:
@@ -258,7 +258,7 @@ async def call_gemini_api_with_manager(prompt: str, worker_id: str, gemini_api_m
         """
         
         generate_content_config = types.GenerateContentConfig(
-            temperature=0.2,  # 낮은 온도로 일관성 확보
+            temperature=0,  # 낮은 온도로 일관성 확보
             response_mime_type="text/plain",
             system_instruction=[types.Part.from_text(text=system_instruction)]
         )
@@ -325,7 +325,7 @@ async def call_gemini_api(prompt: str) -> str:
         """
         
         generate_content_config = types.GenerateContentConfig(
-            temperature=0.2,  # 낮은 온도로 일관성 확보
+            temperature=0,  # 낮은 온도로 일관성 확보
             response_mime_type="text/plain",
             system_instruction=[types.Part.from_text(text=system_instruction)]
         )
