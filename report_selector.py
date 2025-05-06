@@ -224,14 +224,7 @@ async def select_reports_by_agent_preference(
 async def call_gemini_api_with_manager(prompt: str, worker_id: str, gemini_api_manager) -> str:
     """
     API 관리자를 통해 Gemini API를 호출합니다.
-    
-    Args:
-        prompt: 프롬프트 텍스트
-        worker_id: 워커 ID
-        gemini_api_manager: Gemini API 관리자
-        
-    Returns:
-        API 응답 텍스트
+    structured output을 활용하여 일관된 JSON 응답을 보장합니다.
     """
     try:
         # API 관리자에서 클라이언트 가져오기
@@ -252,14 +245,36 @@ async def call_gemini_api_with_manager(prompt: str, worker_id: str, gemini_api_m
         # 시스템 지시사항
         system_instruction = """
         당신은 투자 데이터 선별 전문가입니다. 투자 에이전트의 특성과 전략에 가장 적합한 보고서를 선택하는 임무를 맡았습니다.
-        요청받은 형식과 지침을 정확히 따라 JSON 형식으로 응답해주세요.
-        응답은 반드시 JSON 파싱이 가능해야 합니다.
+        요청받은 지침을 정확히 따라 응답해주세요.
         특별히 에이전트가 선호하는 특정 전문가, 채널, 투자 스타일 등을 분석하여 보고서를 선택하세요.
         """
         
+        # JSON 스키마 정의
+        response_schema = {
+            "type": "object",
+            "properties": {
+                "selected_reports": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "title": {"type": "string"},
+                            "channel": {"type": "string"},
+                            "date": {"type": "string"}
+                        },
+                        "required": ["id", "title", "channel", "date"]
+                    }
+                },
+                "selection_strategy": {"type": "string"}
+            },
+            "required": ["selected_reports", "selection_strategy"]
+        }
+        
         generate_content_config = types.GenerateContentConfig(
             temperature=0,  # 낮은 온도로 일관성 확보
-            response_mime_type="text/plain",
+            response_mime_type="application/json",
+            response_schema=response_schema,
             system_instruction=[types.Part.from_text(text=system_instruction)]
         )
         
@@ -270,6 +285,10 @@ async def call_gemini_api_with_manager(prompt: str, worker_id: str, gemini_api_m
             contents=contents,
             config=generate_content_config
         )
+        
+        # 자동 파싱된 JSON 응답 사용
+        if hasattr(response, 'parsed'):
+            return json.dumps(response.parsed)
         
         return response.text
         

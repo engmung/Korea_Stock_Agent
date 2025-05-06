@@ -21,7 +21,7 @@ load_dotenv()
 # 모듈화된 컴포넌트 임포트
 from notion_utils import find_agent_by_name, create_recommendation_record
 from investment_agent import InvestmentAgent, create_investment_agent
-from report_analyzer import analyze_reports, find_relevant_reports
+from report_analyzer import find_relevant_reports
 from stock_recommender import recommend_stocks
 from performance_evaluator import backtest_recommendation
 from backtest_scheduler import start_scheduler

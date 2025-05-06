@@ -43,26 +43,17 @@ def run_backtest_scheduler():
         is_backtest_running = True
         logger.info("백테스팅 실행 플래그를 True로 설정")
         
-        # 병렬 처리 시스템을 통한 백테스팅 시도 (기존 방식 직접 호출은 제거)
+        # 병렬 처리 시스템을 통한 백테스팅 시도
         logger.info("병렬 처리 시스템을 통한 백테스팅 시도")
         with concurrent.futures.ThreadPoolExecutor() as executor:
             try:
-                # 최대 실행 시간 제한 설정 (예: 4분)
-                timeout_seconds = 240
-                
+                # 타임아웃 없이 작업 실행
                 future = executor.submit(run_async_in_thread, start_parallel_system)
                 logger.info("병렬 시스템 작업 제출됨")
                 
-                # 결과 대기 (타임아웃 적용)
-                try:
-                    future.result(timeout=timeout_seconds)
-                    logger.info("병렬 시스템 실행 완료")
-                except concurrent.futures.TimeoutError:
-                    logger.warning(f"병렬 시스템 실행이 {timeout_seconds}초 내에 완료되지 않아 다음 실행을 위해 종료합니다.")
-                    # 다음 실행을 위해 플래그 재설정
-                    is_backtest_running = False
-                    logger.info("타임아웃으로 백테스팅 실행 플래그를 False로 재설정")
-                    return
+                # 결과를 기다림 (타임아웃 없음)
+                future.result()
+                logger.info("병렬 시스템 실행 완료")
                 
             except Exception as e:
                 logger.error(f"병렬 백테스팅 시스템 실행 중 오류: {str(e)}")

@@ -111,14 +111,13 @@ async def backtest_recommendation(
         # 종목 추천이 제공되지 않은 경우 새로 생성
         if not recommendations:
             # 보고서 분석 - 백테스팅 시작일 기준 이전 데이터만 사용
-            from report_analyzer import find_relevant_reports, analyze_reports
-            from stock_recommender import recommend_stocks
+            from report_analyzer import find_relevant_reports, analyze_reports_with_llm
             
             # 백테스팅 시작일 이전의 관련 보고서 검색 - 디버깅 정보 전달
             reports = await find_relevant_reports(
                 agent=agent,
                 backtest_date=start_date,
-                max_reports=40,
+                max_reports=30,
                 debug_info=debug_info,
                 worker_id=worker_id,
                 notion_api_manager=notion_api_manager,
@@ -132,36 +131,22 @@ async def backtest_recommendation(
                     "message": f"백테스팅 날짜 {start_date} 이전에 관련 보고서가 없습니다."
                 }
             
-            # 보고서 분석
+            # 이제 analyze_reports_with_llm을 직접 사용
             if gemini_api_manager and worker_id:
                 # API 관리자 사용
-                analyzed_reports = await analyze_reports(
-                    reports,
+                recommendations = await analyze_reports_with_llm(
+                    reports=reports,
+                    agent=agent,
+                    investment_period=investment_period,
                     worker_id=worker_id,
                     notion_api_manager=notion_api_manager,
                     gemini_api_manager=gemini_api_manager
                 )
             else:
                 # 기존 방식
-                analyzed_reports = await analyze_reports(reports)
-            
-            # Gemini를 사용한 종목 추천
-            if gemini_api_manager and worker_id:
-                # API 관리자 사용
-                recommendations = await recommend_stocks(
+                recommendations = await analyze_reports_with_llm(
+                    reports=reports,
                     agent=agent,
-                    analyzed_reports=analyzed_reports,
-                    max_stocks=5,
-                    investment_period=investment_period,
-                    worker_id=worker_id,
-                    gemini_api_manager=gemini_api_manager
-                )
-            else:
-                # 기존 방식
-                recommendations = await recommend_stocks(
-                    agent=agent,
-                    analyzed_reports=analyzed_reports,
-                    max_stocks=5,
                     investment_period=investment_period
                 )
         

@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import re
+import json
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -37,11 +38,25 @@ class StockSearcher:
         try:
             response_text = await self._query_gemini(text, "extract_stocks")
             
-            return {
-                "status": "success",
-                "prompt": text,
-                "response": response_text
-            }
+            # 응답 텍스트에서 종목코드 추출 (정규표현식 이용)
+            import re
+            code_match = re.search(r'(\d{6})', response_text)
+            
+            if code_match:
+                stock_code = code_match.group(1)
+                
+                return {
+                    "status": "success",
+                    "prompt": text,
+                    "response": response_text,
+                    "stock_code": stock_code
+                }
+            else:
+                return {
+                    "status": "not_found",
+                    "prompt": text,
+                    "response": response_text
+                }
         except Exception as e:
             logger.error(f"텍스트에서 종목 추출 중 오류 발생: {str(e)}")
             return {
@@ -53,34 +68,11 @@ class StockSearcher:
         """텍스트에서 기간 정보를 추출합니다."""
         try:
             response_text = await self._query_gemini(text, "extract_period")
+            response_data = json.loads(response_text)
             
-            # 응답 텍스트에서 시작일과 종료일 파싱
-            start_date = None
-            end_date = None
-            
-            # JSON 형식 응답인지 확인하고 파싱 시도
-            try:
-                import json
-                if '{' in response_text and '}' in response_text:
-                    # JSON 문자열 추출
-                    json_str = response_text[response_text.find('{'):response_text.rfind('}')+1]
-                    period_data = json.loads(json_str)
-                    start_date = period_data.get("start_date")
-                    end_date = period_data.get("end_date")
-                else:
-                    # 일반 텍스트에서 날짜 추출 시도
-                    lines = response_text.strip().split('\n')
-                    for line in lines:
-                        if "시작일" in line or "start_date" in line or "start date" in line:
-                            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line)
-                            if date_match:
-                                start_date = date_match.group(1)
-                        elif "종료일" in line or "end_date" in line or "end date" in line:
-                            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line)
-                            if date_match:
-                                end_date = date_match.group(1)
-            except Exception as e:
-                logger.info(f"LLM 응답 파싱 중 오류: {str(e)}")
+            # 응답에서 시작일과 종료일 추출
+            start_date = response_data.get("start_date")
+            end_date = response_data.get("end_date")
             
             # 날짜 값 검증 및 기본값 설정
             today = datetime.now().strftime("%Y-%m-%d")
@@ -99,7 +91,6 @@ class StockSearcher:
             return {
                 "status": "success",
                 "prompt": text,
-                "response": response_text,
                 "start_date": start_date,
                 "end_date": end_date
             }
@@ -127,14 +118,15 @@ class StockSearcher:
             if query_type == "extract_stocks":
                 # 종목 추출 시스템 지시사항
                 system_instruction = """
-                내가 주는 텍스트에서 언급된 주식 종목들의 코드를 찾아줘. 
+                내가 주는 텍스트에서 언급된 한국주식 종목들의 코드를 찾아줘. 
                 종목코드는 6자리 형식(예: 005930)으로 제공해줘.
                 구글 검색을 사용해서 정확한 종목 코드를 찾아줘.
+                영어나 숫자는 발음그대로 한국어로 바꿔 검색하면 나올거야.
                 종목명과 종목코드만 간결하게 알려줘.
                 """
                 user_prompt = f"다음 주식 종목의 코드를 찾아줘: {prompt}"
             else:
-                # 기간 추출 시스템 지시사항
+                # 기간 추출 관련 기존 코드 유지...
                 system_instruction = """
                 내가 주는 텍스트에서 백테스팅할 기간 정보를 추출해줘.
                 시작일(start_date)과 종료일(end_date)을 YYYY-MM-DD 형식으로 제공해.
@@ -152,9 +144,10 @@ class StockSearcher:
                 )
             ]
             
+            # 구글 검색 도구만 사용 - JSON 응답 형식 제거
             generate_content_config = types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],  # 구글 검색 사용 설정
-                response_mime_type="text/plain",
+                temperature=0,  # 일관된 응답을 위해 온도 낮게 설정
                 system_instruction=[types.Part.from_text(text=system_instruction)]
             )
             
@@ -166,14 +159,6 @@ class StockSearcher:
                 config=generate_content_config
             )
             
-            # 응답이 없거나 빈 문자열인 경우 처리
-            if not hasattr(response, 'text') or not response.text:
-                logger.info("Gemini API가 빈 응답을 반환했습니다.")
-                if query_type == "extract_stocks":
-                    return "종목코드를 추출할 수 없습니다."
-                else:
-                    return '{"start_date": null, "end_date": null}'
-                
             return response.text
         except Exception as e:
             logger.error(f"Gemini API 호출 중 오류: {str(e)}")
