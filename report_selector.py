@@ -58,10 +58,10 @@ async def select_reports_by_agent_preference(
         if not api_key:
             logger.warning(f"{log_prefix}Gemini API 키가 설정되지 않았습니다. 기본 보고서 선택 방식을 사용합니다.")
             return {
-                "selected_report_ids": [report["page_id"] for report in candidate_reports_metadata[:10]],
+                "selected_report_ids": [report["page_id"] for report in candidate_reports_metadata[:30]],
                 "selection_info": {
-                    "strategy": "기본 선택 (최신 10개)",
-                    "details": [{"id": report["page_id"], "reason": "API 키 없음"} for report in candidate_reports_metadata[:10]]
+                    "strategy": "기본 선택 (최신 30개)",
+                    "details": [{"id": report["page_id"], "reason": "API 키 없음"} for report in candidate_reports_metadata[:30]]
                 }
             }
         
@@ -70,10 +70,10 @@ async def select_reports_by_agent_preference(
         if not agent_prompt:
             logger.warning(f"{log_prefix}에이전트 '{agent.agent_name}'의 프롬프트를 찾을 수 없습니다. 기본 선택 방식을 사용합니다.")
             return {
-                "selected_report_ids": [report["page_id"] for report in candidate_reports_metadata[:10]],
+                "selected_report_ids": [report["page_id"] for report in candidate_reports_metadata[:30]],
                 "selection_info": {
-                    "strategy": "기본 선택 (최신 10개)",
-                    "details": [{"id": report["page_id"], "reason": "에이전트 프롬프트 없음"} for report in candidate_reports_metadata[:10]]
+                    "strategy": "기본 선택 (최신 30개)",
+                    "details": [{"id": report["page_id"], "reason": "에이전트 프롬프트 없음"} for report in candidate_reports_metadata[:30]]
                 }
             }
         
@@ -172,21 +172,21 @@ async def select_reports_by_agent_preference(
             }
             selection_details.append(detail)
         
-        # 기본값 처리: 선택된 보고서가 없으면 기본 10개 반환
+        # 기본값 처리: 선택된 보고서가 없으면 기본 30개 반환
         if not selected_report_ids:
-            logger.warning(f"{log_prefix}선택된 보고서가 없습니다. 기본 10개 보고서를 사용합니다.")
-            selected_report_ids = [report["page_id"] for report in candidate_reports_metadata[:min(10, len(candidate_reports_metadata))]]
+            logger.warning(f"{log_prefix}선택된 보고서가 없습니다. 기본 30개 보고서를 사용합니다.")
+            selected_report_ids = [report["page_id"] for report in candidate_reports_metadata[:min(30, len(candidate_reports_metadata))]]
             selection_details = [{
                 "id": report["page_id"], 
                 "title": report["title"],
                 "channel": report["channel"],
                 "date": report["published_date"],
                 "reason": "기본 선택 (JSON 파싱 실패)"
-            } for report in candidate_reports_metadata[:min(10, len(candidate_reports_metadata))]]
+            } for report in candidate_reports_metadata[:min(30, len(candidate_reports_metadata))]]
             
             # 선택 전략도 업데이트
             if "selection_strategy" not in selection_result:
-                selection_result["selection_strategy"] = "기본 선택 (최신 10개, JSON 파싱 실패)"
+                selection_result["selection_strategy"] = "기본 선택 (최신 30개, JSON 파싱 실패)"
             
         # 선택된 보고서 로깅 - 더 상세한 정보 표시
         for detail in selection_details[:5]:  # 처음 5개만 로깅
@@ -205,12 +205,12 @@ async def select_reports_by_agent_preference(
         
     except Exception as e:
         logger.error(f"{log_prefix}보고서 선택 중 오류 발생: {str(e)}")
-        # 오류 발생 시 기본 10개 반환
-        default_count = min(10, len(candidate_reports_metadata))
+        # 오류 발생 시 기본 30개 반환
+        default_count = min(30, len(candidate_reports_metadata))
         return {
             "selected_report_ids": [report["page_id"] for report in candidate_reports_metadata[:default_count]],
             "selection_info": {
-                "strategy": "기본 선택 (최신 10개, 오류 발생)",
+                "strategy": "기본 선택 (최신 30개, 오류 발생)",
                 "details": [{
                     "id": report["page_id"], 
                     "title": report["title"],

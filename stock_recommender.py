@@ -24,53 +24,6 @@ logger = logging.getLogger(__name__)
 # Gemini API 키
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-class PromptManager:
-    """노션 페이지에서 프롬프트를 관리하는 클래스"""
-    
-    @staticmethod
-    async def get_analysis_prompt(page_id: str) -> Optional[str]:
-        """에이전트 페이지에서 분석 프롬프트 추출"""
-        from notion_utils import get_notion_page_content
-        
-        content = await get_notion_page_content(page_id)
-        
-        # '## 시스템 프롬프트' 섹션 이후의 내용 추출
-        pattern = r'## 시스템 프롬프트\s*\n(.*?)(?=\n##|\Z)'
-        match = re.search(pattern, content, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        return None
-    
-    @staticmethod
-    def get_parsing_prompt() -> str:
-        """파싱용 고정 프롬프트 반환"""
-        return """당신은 투자 분석 텍스트를 구조화된 데이터로 변환하는 전문가입니다.
-        
-주어진 투자 분석 텍스트에서 다음 정보를 추출하여 정확히 지정된 JSON 형식으로 변환하세요:
-1. 추천 종목명 - 반드시 실제 한국 주식시장에 존재하는 구체적인 종목명이어야 합니다
-2. 각 종목별 추천 이유
-3. 전체 포트폴리오 구성 논리
-
-매우 중요한 규칙:
-- 종목명은 절대로 "관심 종목", "추천 종목", "주의 종목" 같은 카테고리 레이블이 아니라 반드시 실제 종목명(예: 삼성전자, SK하이닉스, NAVER, 카카오)을 사용해야 합니다.
-- 텍스트에서 명확하게 언급된 종목만 포함하세요.
-- 종목명이 불분명하거나 일반적인 카테고리만 언급된 경우, 해당 종목은 포함하지 마세요.
-
-응답은 다음 JSON 형식만 사용하세요:
-{
-  "recommended_stocks": [
-    {
-      "name": "종목명(실제 주식 종목명)",
-      "reasoning": "추천 이유",
-    }
-  ],
-  "portfolio_logic": "포트폴리오 구성 논리"
-}
-
-원래 텍스트에 없는 정보는 합리적으로 추정하되, 추정이 불가능한 경우 "미제공"으로 표시하세요.
-오직 JSON 형식만 반환하고 다른 설명은 포함하지 마세요."""
-
-
 class GeminiClient:
     """개선된 Gemini API 클라이언트 - response_schema를 활용한 JSON 응답 직접 생성"""
     
@@ -164,107 +117,6 @@ class GeminiClient:
                 "recommended_stocks": [],
                 "portfolio_logic": f"분석 중 오류 발생: {str(e)}"
             }
-
-async def create_reports_summary(reports: List[Dict[str, Any]]) -> str:
-    """보고서 데이터를 요약하여 문자열로 반환합니다."""
-    if not reports:
-        return "분석된 보고서가 없습니다."
-    
-    # 최대 5개 보고서만 요약
-    summary_reports = reports[:5]
-    
-    summary = "최근 보고서 요약:\n\n"
-    
-    for i, report in enumerate(summary_reports):
-        # 출처 정보 강조하여 표시
-        summary += f"{i+1}. [{report['channel']}] {report['title']} (날짜: {report['published_date']})\n"
-        
-        if "stocks" in report and report["stocks"]:
-            stock_names = [stock["name"] for stock in report["stocks"][:3]]
-            summary += f"   - 주요 언급 종목: {', '.join(stock_names)}\n"
-        
-        summary += "\n"
-    
-    if len(reports) > 5:
-        summary += f"그 외 {len(reports) - 5}개 보고서 정보는 종목 데이터에 통합되었습니다.\n"
-    
-    return summary
-
-async def create_stocks_summary(stocks: List[Dict[str, Any]]) -> str:
-    """종목 데이터를 요약하여 문자열로 반환합니다."""
-    if not stocks:
-        return "분석된 종목이 없습니다."
-    
-    # 최대 10개 종목만 요약
-    summary_stocks = stocks[:10]
-    
-    summary = "종목 요약 (언급 빈도 및 최신 언급 순):\n\n"
-    
-    for i, stock in enumerate(summary_stocks):
-        summary += f"{i+1}. {stock['name']}"
-        
-        if stock.get("code"):
-            summary += f" ({stock['code']})"
-        
-        summary += f" - {stock['report_count']}회 언급, 최근 언급: {stock['recent_mention']}\n"
-        
-        # 출처 정보 추가 (가장 최근 언급된 보고서)
-        if stock.get("reports") and len(stock["reports"]) > 0:
-            latest_report = stock["reports"][0]
-            summary += f"   - 최근 출처: [{latest_report.get('channel', '')}] {latest_report.get('title', '')}\n"
-        
-        if stock.get("recommendation"):
-            summary += f"   - 추천 강도: {stock['recommendation']}\n"
-        
-        if stock.get("investment_horizon"):
-            summary += f"   - 투자 기간: {stock['investment_horizon']}\n"
-        
-        if stock.get("reasons") and len(stock["reasons"]) > 0:
-            reasons = stock["reasons"][:3]  # 최대 3개 이유만 표시
-            summary += f"   - 주요 언급 이유: {' / '.join(reasons)}\n"
-        
-        summary += "\n"
-    
-    if len(stocks) > 10:
-        summary += f"그 외 {len(stocks) - 10}개 종목이 분석되었습니다.\n"
-    
-    return summary
-
-async def create_stocks_summary(stocks: List[Dict[str, Any]]) -> str:
-    """종목 데이터를 요약하여 문자열로 반환합니다."""
-    if not stocks:
-        return "분석된 종목이 없습니다."
-    
-    # 최대 10개 종목만 요약
-    summary_stocks = stocks[:10]
-    
-    summary = "종목 요약 (언급 빈도 및 최신 언급 순):\n\n"
-    
-    for i, stock in enumerate(summary_stocks):
-        summary += f"{i+1}. {stock['name']}"
-        
-        if stock.get("code"):
-            summary += f" ({stock['code']})"
-        
-        summary += f" - {stock['report_count']}회 언급, 최근 언급: {stock['recent_mention']}\n"
-        
-        if stock.get("recommendation"):
-            summary += f"   - 추천 강도: {stock['recommendation']}\n"
-        
-        if stock.get("investment_horizon"):
-            summary += f"   - 투자 기간: {stock['investment_horizon']}\n"
-        
-        if stock.get("reasons") and len(stock["reasons"]) > 0:
-            reasons = stock["reasons"][:3]  # 최대 3개 이유만 표시
-            summary += f"   - 주요 언급 이유: {' / '.join(reasons)}\n"
-        
-        summary += "\n"
-    
-    if len(stocks) > 10:
-        summary += f"그 외 {len(stocks) - 10}개 종목이 분석되었습니다.\n"
-    
-    return summary
-
 
 async def recommend_stocks(
     agent, 
@@ -374,6 +226,7 @@ async def recommend_stocks(
 ## 요청
 1. 위 보고서들을 심층 분석하여 에이전트의 투자 철학에 맞는 종목을 식별해주세요.
 2. 투자 기간은 {investment_period}일입니다.
+3. 최대한 면밀히 분석하고, 추천 이유를 아주 상세하게 작성해 주세요.
 
 중요: 종목명은 절대로 "관심 종목", "추천 종목", "주의 종목" 같은 카테고리 레이블이 아니라 반드시 실제 종목명(예: 삼성전자, SK하이닉스, NAVER, 카카오)을 사용해야 합니다.
 """
@@ -407,24 +260,3 @@ async def recommend_stocks(
         total_time = time.time() - start_time
         logger.error(f"{log_prefix} 종목 추천 중 오류 발생 (경과 시간: {total_time:.2f}초): {str(e)}", exc_info=True)
         return {"error": str(e)}
-
-def extract_json_from_text(text: str) -> str:
-    """텍스트에서 JSON 부분만 추출합니다."""
-    # ```json과 ``` 사이의 내용 추출 시도
-    import re
-    
-    # 패턴 1: ```json과 ``` 사이의 내용
-    json_pattern = r'```json\s*([\s\S]*?)\s*```'
-    match = re.search(json_pattern, text)
-    
-    if match:
-        return match.group(1).strip()
-    
-    # 패턴 2: 단순히 { 로 시작하고 } 로 끝나는 부분
-    json_pattern2 = r'(\{[\s\S]*\})'
-    match = re.search(json_pattern2, text)
-    
-    if match:
-        return match.group(1).strip()
-    
-    return ""

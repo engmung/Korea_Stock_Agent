@@ -293,7 +293,7 @@ async def get_recommendations_by_name(request: RecommendationByNameRequest):
         reports = await find_relevant_reports(
             agent=agent,
             backtest_date=current_date,
-            max_reports=10
+            max_reports=30  # 최대 30개 보고서 가져오기
         )
         
         if not reports:

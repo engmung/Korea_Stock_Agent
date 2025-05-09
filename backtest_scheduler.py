@@ -533,7 +533,7 @@ async def process_stock_recommendation(
         # 최근 보고서 검색
         reports = await find_relevant_reports(
             agent=agent,
-            max_reports=10,  # 최대 10개 보고서 가져오기
+            max_reports=30,  # 최대 30개 보고서 가져오기
             worker_id=worker_id,
             notion_api_manager=notion_api_manager,
             gemini_api_manager=gemini_api_manager
