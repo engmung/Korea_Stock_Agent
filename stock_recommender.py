@@ -32,7 +32,7 @@ class GeminiClient:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY is required")
         self.client = genai.Client(api_key=self.api_key)
-        self.model_name = "gemini-2.5-flash-preview-04-17"
+        self.model_name = "gemini-2.5-flash-preview-05-20"
         logger.debug("GeminiClient 초기화 완료")
     
     async def analyze_with_structured_output(self, system_prompt: str, analysis_data: str, worker_id: Optional[str] = None) -> Dict[str, Any]:
