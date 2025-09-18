@@ -627,6 +627,51 @@ async def clear_schedule_text(page_id: str, notion_api_manager=None) -> bool:
         logger.error(f"예약 필드 비우기 중 오류: {str(e)}")
         return False
 
+async def run_auto_recommendations():
+    """
+    매일 정해진 시간에 '20개'와 '3개' 에이전트의 종목 추천을 자동으로 실행합니다.
+    종목추천 체크박스 상태와 관계없이 실행됩니다.
+    """
+    logger.info("===== 자동 종목 추천 실행 시작 =====")
+
+    try:
+        from notion_utils import find_agent_by_name
+
+        # 처리할 에이전트 목록
+        agent_names = ['20개', '3개']
+
+        for agent_name in agent_names:
+            try:
+                logger.info(f"에이전트 '{agent_name}' 처리 시작")
+
+                # 에이전트 찾기
+                page_id = await find_agent_by_name(agent_name)
+                if not page_id:
+                    logger.warning(f"에이전트 '{agent_name}'를 찾을 수 없습니다.")
+                    continue
+
+                # 종목 추천 실행 (기존 max_stocks=5 사용)
+                await process_stock_recommendation(
+                    page_id=page_id,
+                    agent_name=agent_name
+                )
+
+                logger.info(f"에이전트 '{agent_name}'의 종목 추천 완료")
+
+            except Exception as e:
+                logger.error(f"에이전트 '{agent_name}' 처리 중 오류: {str(e)}")
+                continue
+
+        logger.info("===== 자동 종목 추천 실행 완료 =====")
+
+    except Exception as e:
+        logger.error(f"자동 종목 추천 실행 중 오류: {str(e)}")
+
+def run_auto_recommendations_sync():
+    """동기 함수 래퍼 (APScheduler용)"""
+    import asyncio
+    asyncio.run(run_auto_recommendations())
+
 async def check_backtest_schedules() -> None:
     """
     Notion DB에서 백테스팅 예약이 있거나 종목 추천이 활성화된 에이전트를 확인하고 처리합니다.
@@ -634,17 +679,17 @@ async def check_backtest_schedules() -> None:
     """
     try:
         logger.info("백테스팅 예약 및 종목 추천 확인 시작")
-        
+
         from notion_utils import query_notion_database
-        
+
         # 에이전트 DB 쿼리
         agents = await query_notion_database(NOTION_AGENT_DB_ID)
-        
+
         logger.info(f"총 {len(agents)}개 에이전트 확인 중")
-        
+
         for agent in agents:
             await process_agent_schedules(agent)
-            
+
         logger.info(f"백테스팅 예약 및 종목 추천 확인 완료: {len(agents)}개 에이전트 처리")
     except Exception as e:
         logger.error(f"백테스팅 예약 및 종목 추천 확인 중 오류: {str(e)}")
@@ -676,10 +721,21 @@ def start_scheduler():
         id='backtest_scheduler_main',  # 작업 ID 변경
         replace_existing=True          # 기존 작업 대체
     )
-    
+
+    # 자동 종목 추천 스케줄러 추가 (매일 7:30, 12:30, 19:30)
+    scheduler.add_job(
+        run_auto_recommendations_sync,
+        'cron',
+        hour='7,12,19',  # 7시, 12시, 19시
+        minute='30',      # 30분
+        id='auto_recommendation_scheduler',
+        replace_existing=True
+    )
+
     # 스케줄러 시작
     scheduler.start()
     logger.info("백테스팅 스케줄러 시작됨 (새벽 1시-7시 제외, 매 시간 10-55분 5분 단위로 실행)")
+    logger.info("자동 종목 추천 스케줄러 시작됨 (매일 07:30, 12:30, 19:30 실행)")
 
     # 스케줄러 활성화 상태 확인을 위해 즉시 한 번 실행
     logger.info("스케줄러 상태 확인을 위한 즉시 실행")

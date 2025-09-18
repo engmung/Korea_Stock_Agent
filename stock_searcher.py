@@ -31,7 +31,7 @@ class StockSearcher:
         if not self.api_key:
             logger.warning("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다")
         self.client = genai.Client(api_key=self.api_key)
-        self.model = "gemini-2.5-flash-preview-05-20"
+        self.model = "gemini-2.5-flash"
     
     async def extract_stock_codes(self, text: str) -> Dict[str, Any]:
         """텍스트에서 주식 종목 코드를 추출합니다."""

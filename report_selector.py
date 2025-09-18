@@ -232,7 +232,7 @@ async def call_gemini_api_with_manager(prompt: str, worker_id: str, gemini_api_m
         if not client:
             raise ValueError("Gemini API 클라이언트를 생성할 수 없습니다.")
         
-        model = "gemini-2.5-flash-preview-05-20"  # 최신 모델 사용
+        model = "gemini-2.5-flash"  # 최신 모델 사용
         
         # 요청 구성
         contents = [
@@ -325,7 +325,7 @@ async def call_gemini_api(prompt: str) -> str:
     """
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        model = "gemini-2.5-flash-preview-05-20"  # 최신 모델 사용
+        model = "gemini-2.5-flash"  # 최신 모델 사용
         
         # 요청 구성
         contents = [
